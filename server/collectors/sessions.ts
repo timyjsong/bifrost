@@ -49,6 +49,7 @@ interface TranscriptTail {
   lastEntry?: TailEntry;
   openTools: number;
   nowDoing?: string;
+  lastPromptAt?: number;
 }
 
 interface FileStat {
@@ -233,6 +234,7 @@ function parseTail(chunk: string): TranscriptTail {
         tail.lastEntry = "tool_result";
       } else {
         tail.lastEntry = "user_prompt";
+        if (d.timestamp) tail.lastPromptAt = Date.parse(d.timestamp);
       }
     }
   }
@@ -438,6 +440,7 @@ export async function collectSessions(
       contextTokens: entry.tail.contextTokens,
       transcriptBytes: fs.size,
       nowDoing: lp ? entry.tail.nowDoing : undefined,
+      lastPromptAt: lp ? entry.tail.lastPromptAt : undefined,
     });
   }
 

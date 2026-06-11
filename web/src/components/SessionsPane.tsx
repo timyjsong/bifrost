@@ -61,7 +61,7 @@ function StateBadge({ s, now }: { s: SessionInfo; now: number }) {
   if (s.state === "working") {
     return (
       <span className="rounded-md border border-auto/40 bg-auto/10 px-2 py-px text-[11px] text-auto">
-        in progress
+        in progress{s.lastPromptAt ? ` ${relTime(s.lastPromptAt, now)}` : ""}
       </span>
     );
   }
@@ -88,8 +88,8 @@ function ChildList({ children }: { children: ChildProc[] }) {
             {c.command}
           </span>
           <span className="shrink-0 tabular-nums">
-            {c.pid} · {c.etime} · {fmtKb(c.rssKb)}
-            {c.cpu > 0.5 ? ` · ${c.cpu.toFixed(0)}%` : ""}
+            pid {c.pid} · up {c.etime} · {fmtKb(c.rssKb)} rss
+            {c.cpu > 0.5 ? ` · ${c.cpu.toFixed(0)}% cpu` : ""}
           </span>
         </li>
       ))}

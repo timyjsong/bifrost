@@ -16,6 +16,7 @@ export interface SessionInfo {
   transcriptBytes?: number;
   // live-session activity state (derived; live interactive sessions only)
   state?: "awaiting" | "approval" | "paused" | "working";
+  lastPromptAt?: number; // when the user last typed — anchors the in-progress timer
   childProcs?: number;
   children?: ChildProc[]; // leaf subprocesses currently running under this session
   nowDoing?: string; // last assistant text snippet
