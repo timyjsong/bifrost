@@ -1,0 +1,17 @@
+[Unit]
+Description=Atrium — view-only control tower for the dev box
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=you
+Group=you
+WorkingDirectory=/home/you/atrium
+ExecStart=/home/you/.npm-global/bin/bun server/index.ts
+Restart=on-failure
+RestartSec=5
+MemoryMax=300M
+
+[Install]
+WantedBy=multi-user.target
