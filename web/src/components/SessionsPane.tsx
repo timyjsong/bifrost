@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import type { SessionInfo, ChildProc } from "../../../shared/types";
 import { basename, fmtKb, fmtTokens, relTime, tildify } from "../lib/format";
@@ -123,11 +123,6 @@ function LiveCard({ s, now }: { s: SessionInfo; now: number }) {
             pid {s.pid}
           </span>
         </div>
-        {s.state === "working" && s.nowDoing && (
-          <p className="line-clamp-2 text-[13px] italic leading-relaxed text-ink-dim">
-            {s.nowDoing}
-          </p>
-        )}
         <ChildList children={s.children ?? []} />
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
           <ContextGauge tokens={s.contextTokens} />
@@ -234,6 +229,20 @@ function RecentRow({ s, now }: { s: SessionInfo; now: number }) {
   );
 }
 
+/** Track the xl breakpoint so live cards can pack into independent columns. */
+function useIsWide(): boolean {
+  const [wide, setWide] = useState(
+    () => window.matchMedia("(min-width: 1280px)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width: 1280px)");
+    const onChange = (e: MediaQueryListEvent) => setWide(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return wide;
+}
+
 export function SessionsPane({
   sessions,
   now,
@@ -241,13 +250,21 @@ export function SessionsPane({
   sessions: SessionInfo[];
   now: number;
 }) {
+  const isWide = useIsWide();
   const liveInteractive = sessions.filter((s) => s.live && !s.headless);
-  const needsYou = liveInteractive.filter(
-    (s) => s.state === "awaiting" || s.state === "approval",
-  );
+  // longest-waiting first — the most-forgotten session belongs on top
+  const needsYou = liveInteractive
+    .filter((s) => s.state === "awaiting" || s.state === "approval")
+    .sort((a, b) => a.lastActivityAt - b.lastActivityAt);
   const rest = liveInteractive.filter(
     (s) => s.state !== "awaiting" && s.state !== "approval",
   );
+  const ordered = [...needsYou, ...rest];
+  // Two independently-packed stacks: an expanded card only pushes its own
+  // column, never opening holes beside it (grid rows would couple heights).
+  const columns = isWide
+    ? [ordered.filter((_, i) => i % 2 === 0), ordered.filter((_, i) => i % 2 === 1)]
+    : [ordered];
   const liveHeadless = sessions.filter((s) => s.live && s.headless);
   const recent = sessions.filter((s) => !s.live && !s.headless);
   const recentHeadless = sessions.filter((s) => !s.live && s.headless);
@@ -266,33 +283,31 @@ export function SessionsPane({
       />
       <div className="space-y-3">
         {needsYou.length > 0 && (
-          <div>
-            <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-gold">
-              <Dot tone="gold" pulse />
-              needs you
-            </div>
-            <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-              <AnimatePresence mode="popLayout">
-                {needsYou.map((s) => (
-                  <LiveCard key={s.sessionId} s={s} now={now} />
-                ))}
-              </AnimatePresence>
-            </div>
+          <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-gold">
+            <Dot tone="gold" pulse />
+            needs you · {needsYou.length}
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-          <AnimatePresence mode="popLayout">
-            {rest.map((s) => (
-              <LiveCard key={s.sessionId} s={s} now={now} />
+        {liveInteractive.length > 0 ? (
+          <div
+            className={`grid items-start gap-3 ${isWide ? "grid-cols-2" : "grid-cols-1"}`}
+          >
+            {columns.map((col, i) => (
+              <div key={i} className="space-y-3">
+                <AnimatePresence mode="popLayout">
+                  {col.map((s) => (
+                    <LiveCard key={s.sessionId} s={s} now={now} />
+                  ))}
+                </AnimatePresence>
+              </div>
             ))}
-          </AnimatePresence>
-          {liveInteractive.length === 0 && (
-            <Panel className="px-4 py-6 text-center text-[13px] text-ink-mute xl:col-span-2">
-              no interactive sessions running
-            </Panel>
-          )}
-        </div>
+          </div>
+        ) : (
+          <Panel className="px-4 py-6 text-center text-[13px] text-ink-mute">
+            no interactive sessions running
+          </Panel>
+        )}
 
         <HeadlessGroup list={liveHeadless} now={now} />
 
