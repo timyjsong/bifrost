@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { loadConfig, repoRoot } from "./config";
 import {
@@ -140,8 +140,15 @@ async function fastTick() {
       s.state = deriveState(s, sig, descendants.size);
       if (s.state !== "working") s.nowDoing = undefined; // snippet only meaningful mid-work
     }
+    let bundleId: number | undefined;
+    try {
+      bundleId = statSync(join(distDir, "index.html")).mtimeMs;
+    } catch {
+      // dist not built yet
+    }
     snapshot = {
       generatedAt: Date.now(),
+      bundleId,
       projects,
       sessions: sessRes.sessions,
       system: sysRes.info,

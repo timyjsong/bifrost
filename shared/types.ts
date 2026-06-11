@@ -90,6 +90,7 @@ export interface SystemInfo {
 
 export interface Snapshot {
   generatedAt: number;
+  bundleId?: number; // dist/index.html mtime — frontend reloads when it changes
   projects: ProjectInfo[];
   sessions: SessionInfo[];
   system: SystemInfo;

@@ -58,11 +58,24 @@ function StateBadge({ s, now }: { s: SessionInfo; now: number }) {
       </Chip>
     );
   }
+  if (s.state === "working") {
+    return (
+      <span className="rounded-md border border-auto/40 bg-auto/10 px-2 py-px text-[11px] text-auto">
+        in progress
+      </span>
+    );
+  }
   return null;
 }
 
 function ChildList({ children }: { children: ChildProc[] }) {
-  if (children.length === 0) return null;
+  if (children.length === 0) {
+    return (
+      <div className="flex items-baseline gap-2 font-mono text-[11px] text-ink-mute/70">
+        <span>·</span>no subprocesses running
+      </div>
+    );
+  }
   return (
     <ul className="space-y-1">
       {children.map((c) => (
@@ -259,12 +272,12 @@ export function SessionsPane({
   const rest = liveInteractive.filter(
     (s) => s.state !== "awaiting" && s.state !== "approval",
   );
-  const ordered = [...needsYou, ...rest];
-  // Two independently-packed stacks: an expanded card only pushes its own
-  // column, never opening holes beside it (grid rows would couple heights).
-  const columns = isWide
-    ? [ordered.filter((_, i) => i % 2 === 0), ordered.filter((_, i) => i % 2 === 1)]
-    : [ordered];
+  // Two independently-packed stacks per section: an expanded card only pushes
+  // its own column, never opening holes beside it (grid rows couple heights).
+  const splitColumns = (list: SessionInfo[]) =>
+    isWide
+      ? [list.filter((_, i) => i % 2 === 0), list.filter((_, i) => i % 2 === 1)]
+      : [list];
   const liveHeadless = sessions.filter((s) => s.live && s.headless);
   const recent = sessions.filter((s) => !s.live && !s.headless);
   const recentHeadless = sessions.filter((s) => !s.live && s.headless);
@@ -283,27 +296,50 @@ export function SessionsPane({
       />
       <div className="space-y-3">
         {needsYou.length > 0 && (
-          <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-gold">
-            <Dot tone="gold" pulse />
-            needs you · {needsYou.length}
+          <div>
+            <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-gold">
+              <Dot tone="gold" pulse />
+              needs you · {needsYou.length}
+            </div>
+            <div
+              className={`grid items-start gap-3 ${isWide ? "grid-cols-2" : "grid-cols-1"}`}
+            >
+              {splitColumns(needsYou).map((col, i) => (
+                <div key={i} className="space-y-3">
+                  <AnimatePresence mode="popLayout">
+                    {col.map((s) => (
+                      <LiveCard key={s.sessionId} s={s} now={now} />
+                    ))}
+                  </AnimatePresence>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
-        {liveInteractive.length > 0 ? (
-          <div
-            className={`grid items-start gap-3 ${isWide ? "grid-cols-2" : "grid-cols-1"}`}
-          >
-            {columns.map((col, i) => (
-              <div key={i} className="space-y-3">
-                <AnimatePresence mode="popLayout">
-                  {col.map((s) => (
-                    <LiveCard key={s.sessionId} s={s} now={now} />
-                  ))}
-                </AnimatePresence>
-              </div>
-            ))}
+        {rest.length > 0 && (
+          <div className={needsYou.length > 0 ? "pt-3" : ""}>
+            <div className="mb-2 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-auto">
+              <Dot tone="auto" pulse />
+              in progress · {rest.length}
+            </div>
+            <div
+              className={`grid items-start gap-3 ${isWide ? "grid-cols-2" : "grid-cols-1"}`}
+            >
+              {splitColumns(rest).map((col, i) => (
+                <div key={i} className="space-y-3">
+                  <AnimatePresence mode="popLayout">
+                    {col.map((s) => (
+                      <LiveCard key={s.sessionId} s={s} now={now} />
+                    ))}
+                  </AnimatePresence>
+                </div>
+              ))}
+            </div>
           </div>
-        ) : (
+        )}
+
+        {liveInteractive.length === 0 && (
           <Panel className="px-4 py-6 text-center text-[13px] text-ink-mute">
             no interactive sessions running
           </Panel>

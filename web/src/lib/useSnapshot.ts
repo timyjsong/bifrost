@@ -10,13 +10,23 @@ export function useSnapshot(): SnapshotState {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const lastEvent = useRef(0);
+  const bundleId = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     const es = new EventSource("/api/events");
     es.addEventListener("snapshot", (e) => {
       lastEvent.current = Date.now();
       setConnected(true);
-      setSnap(JSON.parse((e as MessageEvent).data));
+      const next: Snapshot = JSON.parse((e as MessageEvent).data);
+      // a new frontend build was deployed — pick it up instead of going stale
+      if (next.bundleId) {
+        if (bundleId.current && bundleId.current !== next.bundleId) {
+          location.reload();
+          return;
+        }
+        bundleId.current = next.bundleId;
+      }
+      setSnap(next);
     });
     es.onerror = () => setConnected(false);
 
