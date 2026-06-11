@@ -12,7 +12,18 @@ interface LivePidFile {
   procStart?: string;
   kind?: string;
   status?: string;
+  statusUpdatedAt?: number;
   entrypoint?: string;
+}
+
+/** Raw per-session signals for state derivation (kept out of the snapshot). */
+export interface SessionSignals {
+  lastEntry?: TailEntry;
+  openTools: number;
+  cpuQuietMs?: number;
+  pidStatus?: string;
+  pidStatusAgeMs?: number;
+  kind?: string;
 }
 
 interface TranscriptHead {
@@ -25,10 +36,19 @@ interface TranscriptHead {
   sidechain: boolean;
 }
 
+export type TailEntry =
+  | "assistant_done" // completed turn, model waiting
+  | "assistant_tool" // assistant emitted tool calls (or mid-message)
+  | "user_prompt" // user typed; model is (about to be) generating
+  | "tool_result"; // tool finished; model is generating
+
 interface TranscriptTail {
   contextTokens?: number;
   model?: string;
   lastTimestamp?: number;
+  lastEntry?: TailEntry;
+  openTools: number;
+  nowDoing?: string;
 }
 
 interface FileStat {
@@ -55,18 +75,41 @@ let lastFullSweep = 0;
 
 const transcriptCache = new Map<string, TranscriptCacheEntry>();
 
-/** Is the pid alive, and (if procStart given) the same process that wrote the pid file? */
-function procAlive(pid: number, procStart?: string): boolean {
+// pid -> last CPU sample, for "is this process actually computing" detection.
+const cpuTrack = new Map<number, { jiffies: number; quietSince: number }>();
+
+/**
+ * Read /proc/<pid>/stat: liveness (with pid-reuse guard via starttime) plus
+ * cumulative CPU jiffies (utime+stime).
+ */
+function readProc(
+  pid: number,
+  procStart?: string,
+): { alive: boolean; jiffies: number } {
   try {
     const statLine = readFileSync(`/proc/${pid}/stat`, "utf8");
-    if (!procStart) return true;
     // comm (field 2) may contain spaces — parse fields after the closing paren.
-    // After ") ", index 0 is field 3 (state), so field 22 (starttime) is index 19.
-    const after = statLine.slice(statLine.lastIndexOf(")") + 2).trimStart();
-    return after.split(" ")[19] === procStart;
+    // After ") ", index 0 is field 3 (state): utime=idx 11, stime=idx 12, starttime=idx 19.
+    const after = statLine.slice(statLine.lastIndexOf(")") + 2).trimStart().split(" ");
+    if (procStart && after[19] !== procStart) return { alive: false, jiffies: 0 };
+    return { alive: true, jiffies: Number(after[11]) + Number(after[12]) };
   } catch {
-    return false;
+    return { alive: false, jiffies: 0 };
   }
+}
+
+/** Update the CPU tracker for a live pid; returns how long it has been CPU-quiet. */
+function trackCpu(pid: number, jiffies: number, now: number): number {
+  const prev = cpuTrack.get(pid);
+  if (!prev) {
+    cpuTrack.set(pid, { jiffies, quietSince: now });
+    return 0;
+  }
+  // >2 jiffies (~20ms CPU) since last tick = actively computing.
+  const busy = jiffies - prev.jiffies > 2;
+  const quietSince = busy ? now : prev.quietSince;
+  cpuTrack.set(pid, { jiffies, quietSince });
+  return now - quietSince;
 }
 
 function isHeadless(entrypoint?: string): boolean | undefined {
@@ -137,30 +180,63 @@ function parseHead(chunk: string, fileSessionId: string): TranscriptHead | null 
 }
 
 function parseTail(chunk: string): TranscriptTail {
-  const tail: TranscriptTail = {};
-  const lines = chunk.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
+  const tail: TranscriptTail = { openTools: 0 };
+  const toolUses = new Set<string>();
+  const toolResults = new Set<string>();
+  // Forward pass: later lines overwrite, so the final values reflect the file end.
+  // Tool accounting within the window is sound — results always follow their use.
+  for (const line of chunk.split("\n")) {
     if (!line.trim()) continue;
     let d: any;
     try {
       d = JSON.parse(line);
     } catch {
-      continue;
+      continue; // truncated first/last line of the window
     }
-    if (!tail.lastTimestamp && d.timestamp) {
-      tail.lastTimestamp = Date.parse(d.timestamp);
+    if (d.timestamp) tail.lastTimestamp = Date.parse(d.timestamp);
+    const m = d.message;
+    if (d.type === "assistant" && m?.role === "assistant") {
+      if (m.usage?.input_tokens !== undefined) {
+        const u = m.usage;
+        tail.contextTokens =
+          (u.input_tokens ?? 0) +
+          (u.cache_read_input_tokens ?? 0) +
+          (u.cache_creation_input_tokens ?? 0);
+        tail.model = m.model ?? tail.model;
+      }
+      let hasToolUse = false;
+      for (const c of Array.isArray(m.content) ? m.content : []) {
+        if (c?.type === "tool_use" && c.id) {
+          toolUses.add(c.id);
+          hasToolUse = true;
+        }
+        if (c?.type === "text" && typeof c.text === "string" && c.text.trim()) {
+          tail.nowDoing = cleanTitle(c.text).slice(0, 120);
+        }
+      }
+      // Only a stop_reason of end_turn with no tool calls means "turn over".
+      tail.lastEntry =
+        m.stop_reason === "end_turn" && !hasToolUse
+          ? "assistant_done"
+          : "assistant_tool";
+    } else if (d.type === "user" && m?.role === "user") {
+      const content = m.content;
+      if (
+        Array.isArray(content) &&
+        content.some((c: any) => c?.type === "tool_result")
+      ) {
+        for (const c of content) {
+          if (c?.type === "tool_result" && c.tool_use_id) {
+            toolResults.add(c.tool_use_id);
+          }
+        }
+        tail.lastEntry = "tool_result";
+      } else {
+        tail.lastEntry = "user_prompt";
+      }
     }
-    if (!tail.contextTokens && d.message?.usage?.input_tokens !== undefined) {
-      const u = d.message.usage;
-      tail.contextTokens =
-        (u.input_tokens ?? 0) +
-        (u.cache_read_input_tokens ?? 0) +
-        (u.cache_creation_input_tokens ?? 0);
-      tail.model = d.message.model ?? tail.model;
-    }
-    if (tail.contextTokens && tail.lastTimestamp) break;
   }
+  tail.openTools = [...toolUses].filter((id) => !toolResults.has(id)).length;
   return tail;
 }
 
@@ -240,33 +316,57 @@ async function fullSweep(claudeDir: string): Promise<void> {
   }
 }
 
-function collectLive(claudeDir: string): Promise<Map<string, LivePidFile>> {
-  return readdir(join(claudeDir, "sessions")).then(
-    (files) => {
-      const live = new Map<string, LivePidFile>();
-      for (const f of files) {
-        if (!f.endsWith(".json")) continue;
-        try {
-          const d = JSON.parse(
-            readFileSync(join(claudeDir, "sessions", f), "utf8"),
-          ) as LivePidFile;
-          if (d.pid && d.sessionId && procAlive(d.pid, d.procStart)) {
-            live.set(d.sessionId, d);
-          }
-        } catch {
-          // unreadable/partial pid file — treat as not live
-        }
-      }
-      return live;
-    },
-    () => new Map(),
-  );
+async function collectLive(
+  claudeDir: string,
+): Promise<Map<string, LivePidFile & { cpuQuietMs: number }>> {
+  const live = new Map<string, LivePidFile & { cpuQuietMs: number }>();
+  let files: string[] = [];
+  try {
+    files = await readdir(join(claudeDir, "sessions"));
+  } catch {
+    return live;
+  }
+  const now = Date.now();
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const d = JSON.parse(
+        readFileSync(join(claudeDir, "sessions", f), "utf8"),
+      ) as LivePidFile;
+      if (!d.pid || !d.sessionId) continue;
+      const proc = readProc(d.pid, d.procStart);
+      if (!proc.alive) continue;
+      live.set(d.sessionId, {
+        ...d,
+        cpuQuietMs: trackCpu(d.pid, proc.jiffies, now),
+      });
+    } catch {
+      // unreadable/partial pid file — treat as not live
+    }
+  }
+  // prune tracker entries for pids no longer live
+  const livePids = new Set([...live.values()].map((d) => d.pid));
+  for (const pid of cpuTrack.keys()) {
+    if (!livePids.has(pid)) cpuTrack.delete(pid);
+  }
+  return live;
+}
+
+export interface SessionsResult {
+  sessions: SessionInfo[];
+  signals: Map<string, SessionSignals>;
+  livePids: Map<string, number>; // sessionId -> pid (for child-proc counting)
 }
 
 export async function collectSessions(
   cfg: AtriumConfig,
-): Promise<SessionInfo[]> {
+): Promise<SessionsResult> {
   const live = await collectLive(cfg.claudeDir);
+  const scratch = cfg.summarize.scratchDir;
+  // Atrium's own summarizer sessions never appear in the dashboard.
+  for (const [sid, lp] of live) {
+    if (lp.cwd === scratch || lp.cwd.startsWith(scratch + "/")) live.delete(sid);
+  }
 
   const now = Date.now();
   if (now - lastFullSweep > FULL_SWEEP_MS) {
@@ -299,13 +399,28 @@ export async function collectSessions(
   const cutoff = now - cfg.sessions.historyDays * 86_400_000;
   const out: SessionInfo[] = [];
   const seen = new Set<string>();
+  const signals = new Map<string, SessionSignals>();
 
   for (const [sessionId, fs] of fileIndex) {
     const lp = live.get(sessionId);
     if (!lp && fs.mtimeMs < cutoff) continue;
     const entry = await scanTranscript(fs);
     if (!entry || !entry.head || entry.head.sidechain) continue;
+    const cwd = lp?.cwd ?? entry.head.cwd ?? "";
+    if (cwd === scratch || cwd.startsWith(scratch + "/")) continue;
     seen.add(sessionId);
+    if (lp) {
+      signals.set(sessionId, {
+        lastEntry: entry.tail.lastEntry,
+        openTools: entry.tail.openTools,
+        cpuQuietMs: lp.cpuQuietMs,
+        pidStatus: lp.status,
+        pidStatusAgeMs: lp.statusUpdatedAt
+          ? now - lp.statusUpdatedAt
+          : undefined,
+        kind: lp.kind,
+      });
+    }
     out.push({
       sessionId,
       pid: lp?.pid,
@@ -322,12 +437,22 @@ export async function collectSessions(
       lastActivityAt: entry.tail.lastTimestamp ?? fs.mtimeMs,
       contextTokens: entry.tail.contextTokens,
       transcriptBytes: fs.size,
+      nowDoing: lp ? entry.tail.nowDoing : undefined,
     });
   }
 
   // Live sessions whose transcript we didn't find still deserve a row.
   for (const [sessionId, lp] of live) {
     if (seen.has(sessionId)) continue;
+    signals.set(sessionId, {
+      openTools: 0,
+      cpuQuietMs: lp.cpuQuietMs,
+      pidStatus: lp.status,
+      pidStatusAgeMs: lp.statusUpdatedAt
+        ? Date.now() - lp.statusUpdatedAt
+        : undefined,
+      kind: lp.kind,
+    });
     out.push({
       sessionId,
       pid: lp.pid,
@@ -348,6 +473,29 @@ export async function collectSessions(
   });
 
   const liveRows = out.filter((s) => s.live);
-  const history = out.filter((s) => !s.live).slice(0, cfg.sessions.maxHistory);
-  return [...liveRows, ...history];
+  // Interactive history gets the cap; headless corpses only fill what's left,
+  // so probe swarms can't bury real sessions.
+  const dead = out.filter((s) => !s.live);
+  const deadInteractive = dead
+    .filter((s) => !s.headless)
+    .slice(0, cfg.sessions.maxHistory);
+  const deadHeadless = dead
+    .filter((s) => s.headless)
+    .slice(0, Math.max(0, cfg.sessions.maxHistory - deadInteractive.length));
+  const history = [...deadInteractive, ...deadHeadless].sort(
+    (a, b) => b.lastActivityAt - a.lastActivityAt,
+  );
+  const livePids = new Map<string, number>();
+  for (const [sid, lp] of live) livePids.set(sid, lp.pid);
+  return { sessions: [...liveRows, ...history], signals, livePids };
+}
+
+/** Transcript path for a known session id, if indexed. */
+export function transcriptPathFor(sessionId: string): string | undefined {
+  return fileIndex.get(sessionId)?.path;
+}
+
+/** Latest known mtime for a session's transcript. */
+export function transcriptMtimeFor(sessionId: string): number | undefined {
+  return fileIndex.get(sessionId)?.mtimeMs;
 }

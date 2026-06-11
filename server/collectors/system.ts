@@ -17,23 +17,30 @@ async function run(cmd: string[], timeoutMs = 5000): Promise<string | null> {
 
 const CLAUDE_RE = /(^|\/| )(claude|ccd-cli)(\s|$|\/)/;
 
-async function collectProcs(): Promise<{ procs: ProcInfo[]; claudeTotalRssKb: number }> {
+async function collectProcs(): Promise<{
+  procs: ProcInfo[];
+  claudeTotalRssKb: number;
+  pidTree: [number, number][];
+}> {
   const out = await run([
-    "ps", "axo", "pid=,user=,rss=,pcpu=,etime=,args=", "--sort=-rss",
+    "ps", "axo", "pid=,ppid=,user=,rss=,pcpu=,etime=,args=", "--sort=-rss",
   ]);
-  if (!out) return { procs: [], claudeTotalRssKb: 0 };
+  if (!out) return { procs: [], claudeTotalRssKb: 0, pidTree: [] };
 
   const all: ProcInfo[] = [];
   for (const line of out.split("\n")) {
-    const m = line.match(/^\s*(\d+)\s+(\S+)\s+(\d+)\s+([\d.]+)\s+(\S+)\s+(.*)$/);
+    const m = line.match(
+      /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+([\d.]+)\s+(\S+)\s+(.*)$/,
+    );
     if (!m) continue;
-    const command = m[6].trim();
+    const command = m[7].trim();
     all.push({
       pid: Number(m[1]),
-      user: m[2],
-      rssKb: Number(m[3]),
-      cpu: Number(m[4]),
-      etime: m[5],
+      ppid: Number(m[2]),
+      user: m[3],
+      rssKb: Number(m[4]),
+      cpu: Number(m[5]),
+      etime: m[6],
       command: command.length > 160 ? command.slice(0, 157) + "…" : command,
       isClaude: CLAUDE_RE.test(command),
     });
@@ -46,7 +53,8 @@ async function collectProcs(): Promise<{ procs: ProcInfo[]; claudeTotalRssKb: nu
   const procs = [...claude, ...top]
     .sort((a, b) => b.rssKb - a.rssKb)
     .slice(0, 30);
-  return { procs, claudeTotalRssKb };
+  const pidTree = all.map((p) => [p.pid, p.ppid] as [number, number]);
+  return { procs, claudeTotalRssKb, pidTree };
 }
 
 async function collectTmux(): Promise<TmuxInfo[]> {
@@ -92,7 +100,12 @@ async function collectPorts(): Promise<PortInfo[]> {
   return ports.sort((a, b) => a.port - b.port);
 }
 
-export async function collectSystem(): Promise<SystemInfo> {
+export interface SystemResult {
+  info: SystemInfo;
+  pidTree: [number, number][]; // [pid, ppid] for every process on the box
+}
+
+export async function collectSystem(): Promise<SystemResult> {
   const [loadRaw, memRaw, uptimeRaw, procsRes, tmux, ports] = await Promise.all([
     readFile("/proc/loadavg", "utf8"),
     readFile("/proc/meminfo", "utf8"),
@@ -116,14 +129,17 @@ export async function collectSystem(): Promise<SystemInfo> {
   }
 
   return {
-    hostname: hostname(),
-    uptimeSec: Math.floor(Number(uptimeRaw.split(" ")[0])),
-    load,
-    cores: cpus().length,
-    mem,
-    procs: procsRes.procs,
-    claudeTotalRssKb: procsRes.claudeTotalRssKb,
-    tmux,
-    ports,
+    info: {
+      hostname: hostname(),
+      uptimeSec: Math.floor(Number(uptimeRaw.split(" ")[0])),
+      load,
+      cores: cpus().length,
+      mem,
+      procs: procsRes.procs,
+      claudeTotalRssKb: procsRes.claudeTotalRssKb,
+      tmux,
+      ports,
+    },
+    pidTree: procsRes.pidTree,
   };
 }

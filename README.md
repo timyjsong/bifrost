@@ -12,9 +12,11 @@ A local web dashboard for the `dev` box — **a single pane over everything in m
 - **Spans realms:** `~/projects` + `~/work` today; more realms (`~/docs`, `~/skills`, …) are one config line each — the lens *over* the box, which is why it lives at root rather than inside `~/projects/`.
 - **Later:** interactive — drive and steer Claude Code sessions from the GUI.
 
-## Hard constraint (v2 and forever)
+## Hard constraint (amended v1.1)
 
-**Atrium must never invoke `claude -p`, headless mode, or the Agent SDK.** From 2026-06-15, programmatic Claude Code usage bills to a separate credit bucket. v1 is structurally immune (it only reads files and `/proc`). v2 interaction must inject into *existing interactive* sessions (tmux send-keys, file/socket message bus) — never spawn a programmatic session.
+**Atrium must never invoke `claude -p`, headless mode, or the Agent SDK.** From 2026-06-15, programmatic Claude Code usage bills to a separate credit bucket.
+
+**One sanctioned exception (v1.1, my call 2026-06-11):** the summarize feature dispatches `claude --bg --model haiku` — background sessions are interactive-class (I accepted the residual billing ambiguity; locally corroborated by bg pid files carrying a non-SDK entrypoint). The dispatch happens **only on an explicit button click**, never automatically. Everything else stays read-only: files + `/proc`.
 
 ## Architecture
 
@@ -34,9 +36,18 @@ deploy/atrium.service systemd unit
 ```
 
 - **Fast tick (3s):** sessions + system → snapshot → pushed to browsers over SSE (`/api/events`).
-- **Slow tick (30s):** project/git scans.
+- **Slow tick (30s):** project/git scans + full transcript-index sweep.
 - **Sessions are box-wide;** the Projects pane shows only allowlisted realms.
 - Headless (sdk-driven) sessions are detected via `entrypoint` and shown collapsed.
+- **Activity state** (v1.1): derived disk-first from the transcript tail (last entry type + open
+  tool calls), corroborated by child-process count (ps ppid tree), per-pid CPU deltas, and the
+  pid-file `status` when fresh. States: `awaiting` (turn over, nothing running — the NEEDS YOU
+  group), `approval` (dangling tool call, no children, CPU-quiet — likely a permission prompt),
+  `paused` (turn over but spawned processes still out), `working`.
+- **Summaries** (v1.1): `POST /api/sessions/:id/summarize` condenses the transcript server-side,
+  dispatches `claude --bg --model haiku`, polls the bg transcript for the result, `claude rm`s
+  the session, and caches to `~/.cache/atrium/summaries` keyed by source mtime. Known limitation:
+  a *detached* daemon (nohup, reparented to init) is invisible to the child-process check.
 
 ## Run
 

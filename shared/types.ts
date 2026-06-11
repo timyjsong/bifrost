@@ -14,6 +14,10 @@ export interface SessionInfo {
   lastActivityAt: number; // epoch ms
   contextTokens?: number;
   transcriptBytes?: number;
+  // live-session activity state (derived; live interactive sessions only)
+  state?: "awaiting" | "approval" | "paused" | "working";
+  childProcs?: number;
+  nowDoing?: string; // last assistant text snippet
 }
 
 export interface ProjectGit {
@@ -36,6 +40,7 @@ export interface ProjectInfo {
 
 export interface ProcInfo {
   pid: number;
+  ppid: number;
   user: string;
   rssKb: number;
   cpu: number;

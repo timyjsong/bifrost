@@ -6,5 +6,13 @@
   ],
   "claudeDir": "~/.claude",
   "refresh": { "fastMs": 3000, "slowMs": 30000 },
-  "sessions": { "historyDays": 14, "maxHistory": 60 }
+  "sessions": { "historyDays": 14, "maxHistory": 60 },
+  "summarize": {
+    "claudeBin": "/home/you/.local/bin/claude",
+    "model": "haiku",
+    "scratchDir": "~/.cache/atrium/bg",
+    "cacheDir": "~/.cache/atrium/summaries",
+    "maxInFlight": 2,
+    "timeoutMs": 120000
+  }
 }

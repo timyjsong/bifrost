@@ -1,10 +1,14 @@
 import { existsSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { loadConfig, repoRoot } from "./config";
-import { collectSessions } from "./collectors/sessions";
+import {
+  collectSessions,
+  type SessionSignals,
+} from "./collectors/sessions";
 import { collectProjects } from "./collectors/projects";
 import { collectSystem } from "./collectors/system";
-import type { Snapshot, ProjectInfo } from "../shared/types";
+import { summarizeSession } from "./summarize";
+import type { Snapshot, ProjectInfo, SessionInfo } from "../shared/types";
 
 const cfg = loadConfig();
 const distDir = join(repoRoot, "web", "dist");
@@ -29,16 +33,78 @@ let snapshot: Snapshot = {
 };
 let projects: ProjectInfo[] = [];
 
+/** Count all descendants of a pid from a [pid, ppid] snapshot. */
+function countDescendants(root: number, pidTree: [number, number][]): number {
+  const children = new Map<number, number[]>();
+  for (const [pid, ppid] of pidTree) {
+    let arr = children.get(ppid);
+    if (!arr) children.set(ppid, (arr = []));
+    arr.push(pid);
+  }
+  let count = 0;
+  const stack = [root];
+  while (stack.length) {
+    for (const child of children.get(stack.pop()!) ?? []) {
+      count++;
+      stack.push(child);
+    }
+  }
+  return count;
+}
+
+/**
+ * Derive a live interactive session's activity state from its signals.
+ * Disk (transcript tail) is primary; children/CPU corroborate; the pid-file
+ * status only demotes a false "awaiting" when it freshly says busy.
+ */
+function deriveState(
+  s: SessionInfo,
+  sig: SessionSignals,
+  childProcs: number,
+): SessionInfo["state"] {
+  if (!s.live || s.headless || sig.kind === "bg") return undefined;
+  const statusFresh =
+    sig.pidStatusAgeMs !== undefined && sig.pidStatusAgeMs < 15_000;
+  if (sig.lastEntry === "assistant_done" && sig.openTools === 0) {
+    if (statusFresh && (sig.pidStatus === "busy" || sig.pidStatus === "shell")) {
+      return "working";
+    }
+    return childProcs > 0 ? "paused" : "awaiting";
+  }
+  if (
+    sig.openTools > 0 &&
+    childProcs === 0 &&
+    (sig.cpuQuietMs ?? 0) > 10_000 &&
+    !(statusFresh && sig.pidStatus === "busy")
+  ) {
+    return "approval";
+  }
+  return "working";
+}
+
 let fastBusy = false;
 async function fastTick() {
   if (fastBusy) return;
   fastBusy = true;
   try {
-    const [sessions, system] = await Promise.all([
+    const [sessRes, sysRes] = await Promise.all([
       collectSessions(cfg),
       collectSystem(),
     ]);
-    snapshot = { generatedAt: Date.now(), projects, sessions, system };
+    for (const s of sessRes.sessions) {
+      const sig = sessRes.signals.get(s.sessionId);
+      if (!sig || !s.pid) continue;
+      const childProcs = countDescendants(s.pid, sysRes.pidTree);
+      s.childProcs = childProcs;
+      s.state = deriveState(s, sig, childProcs);
+      if (s.state !== "working") s.nowDoing = undefined; // snippet only meaningful mid-work
+    }
+    snapshot = {
+      generatedAt: Date.now(),
+      projects,
+      sessions: sessRes.sessions,
+      system: sysRes.info,
+    };
     broadcast(snapshot);
   } catch (err) {
     console.error("[atrium] fast tick failed:", err);
@@ -165,6 +231,19 @@ const server = Bun.serve({
     const url = new URL(req.url);
     if (url.pathname === "/api/state") {
       return Response.json(snapshot);
+    }
+    const sumMatch = url.pathname.match(
+      /^\/api\/sessions\/([0-9a-f-]{36})\/summarize$/,
+    );
+    if (sumMatch && req.method === "POST") {
+      try {
+        const result = await summarizeSession(cfg, sumMatch[1]);
+        return Response.json(result);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const status = message === "unknown session" ? 404 : 500;
+        return Response.json({ error: message }, { status });
+      }
     }
     if (url.pathname === "/api/events") {
       return sseResponse();
