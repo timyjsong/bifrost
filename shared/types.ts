@@ -17,7 +17,16 @@ export interface SessionInfo {
   // live-session activity state (derived; live interactive sessions only)
   state?: "awaiting" | "approval" | "paused" | "working";
   childProcs?: number;
+  children?: ChildProc[]; // leaf subprocesses currently running under this session
   nowDoing?: string; // last assistant text snippet
+}
+
+export interface ChildProc {
+  pid: number;
+  etime: string;
+  rssKb: number;
+  cpu: number;
+  command: string;
 }
 
 export interface ProjectGit {

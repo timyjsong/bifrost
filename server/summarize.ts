@@ -12,6 +12,9 @@ export interface SummaryResult {
 
 const inFlight = new Map<string, Promise<SummaryResult>>();
 
+// Bump when the prompt changes — cached summaries from older prompts regenerate.
+const PROMPT_VERSION = 2;
+
 function extractText(content: unknown): string | undefined {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -147,9 +150,10 @@ async function runSummarize(
 
   const prompt =
     "You are summarizing one of the user's own Claude Code working sessions back to them. " +
-    "Write a concise, plain-English summary: 4-8 short bullet points covering what was asked for, " +
-    "what got done, key decisions made, and what (if anything) the session is currently waiting on. " +
-    "No preamble, no headings — just the bullets. Do not use any tools.\n\n" +
+    "Write 4-8 markdown bullet points covering: what was asked for, what got done, key decisions, " +
+    "and what (if anything) the session is waiting on now. Rules: each bullet is exactly ONE short, " +
+    "plain sentence on its own line; you may bold the 2-3 most important phrases; no headings, " +
+    "no preamble, no nested bullets. Do not use any tools.\n\n" +
     `<session-transcript>\n${convo}\n</session-transcript>`;
 
   mkdirSync(cfg.summarize.scratchDir, { recursive: true });
@@ -177,7 +181,12 @@ async function runSummarize(
   mkdirSync(cfg.summarize.cacheDir, { recursive: true });
   await writeFile(
     join(cfg.summarize.cacheDir, `${sessionId}.json`),
-    JSON.stringify({ sourceMtimeMs: sourceMtime, summary, createdAt: Date.now() }),
+    JSON.stringify({
+      sourceMtimeMs: sourceMtime,
+      summary,
+      createdAt: Date.now(),
+      promptV: PROMPT_VERSION,
+    }),
   );
   return result;
 }
@@ -197,7 +206,11 @@ export async function summarizeSession(
   if (existsSync(cachePath)) {
     try {
       const c = JSON.parse(await readFile(cachePath, "utf8"));
-      if (c.sourceMtimeMs === sourceMtime && c.summary) {
+      if (
+        c.sourceMtimeMs === sourceMtime &&
+        c.summary &&
+        c.promptV === PROMPT_VERSION
+      ) {
         return { summary: c.summary, asOf: c.sourceMtimeMs, cached: true };
       }
     } catch {

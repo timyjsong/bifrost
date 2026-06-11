@@ -21,11 +21,12 @@ async function collectProcs(): Promise<{
   procs: ProcInfo[];
   claudeTotalRssKb: number;
   pidTree: [number, number][];
+  allProcs: ProcInfo[];
 }> {
   const out = await run([
     "ps", "axo", "pid=,ppid=,user=,rss=,pcpu=,etime=,args=", "--sort=-rss",
   ]);
-  if (!out) return { procs: [], claudeTotalRssKb: 0, pidTree: [] };
+  if (!out) return { procs: [], claudeTotalRssKb: 0, pidTree: [], allProcs: [] };
 
   const all: ProcInfo[] = [];
   for (const line of out.split("\n")) {
@@ -54,7 +55,7 @@ async function collectProcs(): Promise<{
     .sort((a, b) => b.rssKb - a.rssKb)
     .slice(0, 30);
   const pidTree = all.map((p) => [p.pid, p.ppid] as [number, number]);
-  return { procs, claudeTotalRssKb, pidTree };
+  return { procs, claudeTotalRssKb, pidTree, allProcs: all };
 }
 
 async function collectTmux(): Promise<TmuxInfo[]> {
@@ -103,6 +104,7 @@ async function collectPorts(): Promise<PortInfo[]> {
 export interface SystemResult {
   info: SystemInfo;
   pidTree: [number, number][]; // [pid, ppid] for every process on the box
+  allProcs: ProcInfo[]; // full ps snapshot, for per-session child details
 }
 
 export async function collectSystem(): Promise<SystemResult> {
@@ -141,5 +143,6 @@ export async function collectSystem(): Promise<SystemResult> {
       ports,
     },
     pidTree: procsRes.pidTree,
+    allProcs: procsRes.allProcs,
   };
 }

@@ -8,7 +8,13 @@ import {
 import { collectProjects } from "./collectors/projects";
 import { collectSystem } from "./collectors/system";
 import { summarizeSession } from "./summarize";
-import type { Snapshot, ProjectInfo, SessionInfo } from "../shared/types";
+import type {
+  Snapshot,
+  ProjectInfo,
+  SessionInfo,
+  ProcInfo,
+  ChildProc,
+} from "../shared/types";
 
 const cfg = loadConfig();
 const distDir = join(repoRoot, "web", "dist");
@@ -33,23 +39,57 @@ let snapshot: Snapshot = {
 };
 let projects: ProjectInfo[] = [];
 
-/** Count all descendants of a pid from a [pid, ppid] snapshot. */
-function countDescendants(root: number, pidTree: [number, number][]): number {
+/** All descendant pids of a root, from a [pid, ppid] snapshot. */
+function descendantsOf(root: number, pidTree: [number, number][]): Set<number> {
   const children = new Map<number, number[]>();
   for (const [pid, ppid] of pidTree) {
     let arr = children.get(ppid);
     if (!arr) children.set(ppid, (arr = []));
     arr.push(pid);
   }
-  let count = 0;
+  const found = new Set<number>();
   const stack = [root];
   while (stack.length) {
     for (const child of children.get(stack.pop()!) ?? []) {
-      count++;
+      found.add(child);
       stack.push(child);
     }
   }
-  return count;
+  return found;
+}
+
+/**
+ * The leaf processes among a session's descendants — the actual work
+ * (shell-snapshot bash wrappers are parents of the real command, so leaves
+ * are what's worth showing).
+ */
+function leafChildren(
+  descendants: Set<number>,
+  pidTree: [number, number][],
+  allProcs: ProcInfo[],
+): ChildProc[] {
+  const parents = new Set(
+    pidTree.filter(([pid]) => descendants.has(pid)).map(([, ppid]) => ppid),
+  );
+  return allProcs
+    .filter((p) => descendants.has(p.pid) && !parents.has(p.pid))
+    .sort((a, b) => b.cpu - a.cpu || b.rssKb - a.rssKb)
+    .slice(0, 6)
+    .map((p) => ({
+      pid: p.pid,
+      etime: p.etime,
+      rssKb: p.rssKb,
+      cpu: p.cpu,
+      command: cleanCommand(p.command),
+    }));
+}
+
+/** Strip the shell-snapshot wrapper noise so the actual command shows. */
+function cleanCommand(cmd: string): string {
+  const evalMatch = cmd.match(/eval '(.+)/);
+  let c = evalMatch ? evalMatch[1] : cmd;
+  c = c.replace(/\s+/g, " ").trim();
+  return c.length > 90 ? c.slice(0, 87) + "…" : c;
 }
 
 /**
@@ -94,9 +134,10 @@ async function fastTick() {
     for (const s of sessRes.sessions) {
       const sig = sessRes.signals.get(s.sessionId);
       if (!sig || !s.pid) continue;
-      const childProcs = countDescendants(s.pid, sysRes.pidTree);
-      s.childProcs = childProcs;
-      s.state = deriveState(s, sig, childProcs);
+      const descendants = descendantsOf(s.pid, sysRes.pidTree);
+      s.childProcs = descendants.size;
+      s.children = leafChildren(descendants, sysRes.pidTree, sysRes.allProcs);
+      s.state = deriveState(s, sig, descendants.size);
       if (s.state !== "working") s.nowDoing = undefined; // snippet only meaningful mid-work
     }
     snapshot = {

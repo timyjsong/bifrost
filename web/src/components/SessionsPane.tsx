@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import type { SessionInfo } from "../../../shared/types";
-import { basename, fmtTokens, relTime, tildify } from "../lib/format";
+import type { SessionInfo, ChildProc } from "../../../shared/types";
+import { basename, fmtKb, fmtTokens, relTime, tildify } from "../lib/format";
 import { Bar, Chip, Dot, Panel, SectionTitle } from "./ui";
 import { SummaryBlock } from "./SummaryBlock";
 
@@ -61,6 +61,29 @@ function StateBadge({ s, now }: { s: SessionInfo; now: number }) {
   return null;
 }
 
+function ChildList({ children }: { children: ChildProc[] }) {
+  if (children.length === 0) return null;
+  return (
+    <ul className="space-y-1">
+      {children.map((c) => (
+        <li
+          key={c.pid}
+          className="flex items-baseline gap-2 font-mono text-[11px] text-ink-mute"
+        >
+          <span className="text-gold-dim">·</span>
+          <span className="min-w-0 flex-1 truncate text-ink-dim">
+            {c.command}
+          </span>
+          <span className="shrink-0 tabular-nums">
+            {c.pid} · {c.etime} · {fmtKb(c.rssKb)}
+            {c.cpu > 0.5 ? ` · ${c.cpu.toFixed(0)}%` : ""}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function LiveCard({ s, now }: { s: SessionInfo; now: number }) {
   const needsYou = s.state === "awaiting" || s.state === "approval";
   return (
@@ -100,30 +123,23 @@ function LiveCard({ s, now }: { s: SessionInfo; now: number }) {
             pid {s.pid}
           </span>
         </div>
-        {s.state === "working" && s.nowDoing ? (
+        {s.state === "working" && s.nowDoing && (
           <p className="line-clamp-2 text-[13px] italic leading-relaxed text-ink-dim">
             {s.nowDoing}
           </p>
-        ) : (
-          s.title && (
-            <p className="line-clamp-2 text-[13px] leading-relaxed text-ink-dim">
-              {s.title}
-            </p>
-          )
         )}
+        <ChildList children={s.children ?? []} />
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
           <ContextGauge tokens={s.contextTokens} />
           <span className="text-[11px] text-ink-mute">
             up {relTime(s.startedAt, now)} · active {relTime(s.lastActivityAt, now)}
           </span>
         </div>
-        <div className="mt-auto pt-1">
-          <SummaryBlock
-            sessionId={s.sessionId}
-            lastActivityAt={s.lastActivityAt}
-            now={now}
-          />
-        </div>
+        <SummaryBlock
+          sessionId={s.sessionId}
+          lastActivityAt={s.lastActivityAt}
+          now={now}
+        />
       </Panel>
     </motion.div>
   );

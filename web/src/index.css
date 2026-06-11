@@ -51,6 +51,35 @@ body {
   scrollbar-color: #2a2a30 transparent;
 }
 
+/* rendered markdown inside summary panels */
+.summary-md ul,
+.summary-md ol {
+  margin: 0;
+  padding-left: 1.1em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45em;
+}
+.summary-md ul { list-style: none; }
+.summary-md ul li { position: relative; }
+.summary-md ul li::before {
+  content: "·";
+  position: absolute;
+  left: -1em;
+  color: var(--color-gold-dim);
+}
+.summary-md p { margin: 0 0 0.45em; }
+.summary-md p:last-child { margin-bottom: 0; }
+.summary-md strong { color: var(--color-ink); font-weight: 550; }
+.summary-md code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  color: var(--color-ink);
+  background: var(--color-line-soft);
+  padding: 0 0.3em;
+  border-radius: 4px;
+}
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.55; transform: scale(0.82); }

@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import Markdown from "react-markdown";
 import { relTime } from "../lib/format";
 
 type Phase =
@@ -57,7 +58,7 @@ export function SummaryBlock({
         >
           <span className="text-gold/70">✦</span>
           {phase.kind === "loading"
-            ? "summarizing… ~20s"
+            ? "summarizing…"
             : phase.kind === "done"
               ? open
                 ? "hide summary"
@@ -80,6 +81,7 @@ export function SummaryBlock({
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.3, ease: "easeOut" }}
+            style={{ transformOrigin: "top" }}
             className="overflow-hidden"
           >
             <div className="mt-2 rounded-lg border border-line-soft bg-bg/60 px-3.5 py-3">
@@ -93,8 +95,8 @@ export function SummaryBlock({
                 <div className="text-[12px] text-danger">{phase.message}</div>
               )}
               {phase.kind === "done" && (
-                <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-ink-dim">
-                  {phase.summary}
+                <div className="summary-md text-[12.5px] leading-relaxed text-ink-dim">
+                  <Markdown>{phase.summary}</Markdown>
                 </div>
               )}
             </div>
