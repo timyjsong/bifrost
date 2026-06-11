@@ -9,7 +9,7 @@ User=you
 Group=you
 WorkingDirectory=/home/you/atrium
 ExecStart=/home/you/.npm-global/bin/bun server/index.ts
-Restart=on-failure
+Restart=always
 RestartSec=5
 MemoryMax=300M
 
