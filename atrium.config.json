@@ -1,0 +1,10 @@
+{
+  "bind": { "host": "100.100.100.100", "port": 4444 },
+  "realms": [
+    { "name": "projects", "path": "~/projects" },
+    { "name": "work", "path": "~/work" }
+  ],
+  "claudeDir": "~/.claude",
+  "refresh": { "fastMs": 3000, "slowMs": 30000 },
+  "sessions": { "historyDays": 14, "maxHistory": 60 }
+}
