@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { statfsSync } from "node:fs";
 import { hostname, cpus } from "node:os";
 import type { SystemInfo, ProcInfo, TmuxInfo, PortInfo } from "../../shared/types";
 
@@ -101,6 +102,34 @@ async function collectPorts(): Promise<PortInfo[]> {
   return ports.sort((a, b) => a.port - b.port);
 }
 
+// previous /proc/stat sample, for real CPU utilization between ticks
+let prevCpu: { busy: number; total: number } | null = null;
+
+function readCpuPct(statRaw: string): number | undefined {
+  const f = statRaw.split("\n")[0].trim().split(/\s+/).slice(1).map(Number);
+  const idle = f[3] + (f[4] ?? 0); // idle + iowait
+  const total = f.reduce((a, b) => a + (b || 0), 0);
+  const busy = total - idle;
+  let pct: number | undefined;
+  if (prevCpu && total > prevCpu.total) {
+    pct = ((busy - prevCpu.busy) / (total - prevCpu.total)) * 100;
+  }
+  prevCpu = { busy, total };
+  return pct === undefined ? undefined : Math.max(0, Math.min(100, pct));
+}
+
+function diskInfo(): { totalKb: number; freeKb: number } {
+  try {
+    const s = statfsSync("/");
+    return {
+      totalKb: Math.round((s.blocks * s.bsize) / 1024),
+      freeKb: Math.round((s.bavail * s.bsize) / 1024),
+    };
+  } catch {
+    return { totalKb: 0, freeKb: 0 };
+  }
+}
+
 export interface SystemResult {
   info: SystemInfo;
   pidTree: [number, number][]; // [pid, ppid] for every process on the box
@@ -108,14 +137,16 @@ export interface SystemResult {
 }
 
 export async function collectSystem(): Promise<SystemResult> {
-  const [loadRaw, memRaw, uptimeRaw, procsRes, tmux, ports] = await Promise.all([
-    readFile("/proc/loadavg", "utf8"),
-    readFile("/proc/meminfo", "utf8"),
-    readFile("/proc/uptime", "utf8"),
-    collectProcs(),
-    collectTmux(),
-    collectPorts(),
-  ]);
+  const [loadRaw, memRaw, uptimeRaw, statRaw, procsRes, tmux, ports] =
+    await Promise.all([
+      readFile("/proc/loadavg", "utf8"),
+      readFile("/proc/meminfo", "utf8"),
+      readFile("/proc/uptime", "utf8"),
+      readFile("/proc/stat", "utf8"),
+      collectProcs(),
+      collectTmux(),
+      collectPorts(),
+    ]);
 
   const load = loadRaw.split(" ").slice(0, 3).map(Number) as [number, number, number];
 
@@ -135,6 +166,8 @@ export async function collectSystem(): Promise<SystemResult> {
       hostname: hostname(),
       uptimeSec: Math.floor(Number(uptimeRaw.split(" ")[0])),
       load,
+      cpuPct: readCpuPct(statRaw),
+      disk: diskInfo(),
       cores: cpus().length,
       mem,
       procs: procsRes.procs,

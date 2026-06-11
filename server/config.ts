@@ -17,9 +17,15 @@ export interface AtriumConfig {
   summarize: {
     claudeBin: string;
     model: string;
+    effort: string;
+    fastStartArgs: string[];
     scratchDir: string;
     cacheDir: string;
-    maxInFlight: number;
+    perJobMb: number; // est. memory per summarize job
+    ramShare: number; // summaries may use up to this share of total RAM
+    memReservePct: number; // hold dispatch if free RAM falls below this share of total
+    maxInFlightCap: number; // hard ceiling regardless of box size
+    maxQueue: number;
     timeoutMs: number;
   };
 }

@@ -1,4 +1,4 @@
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile, readdir, stat, open } from "node:fs/promises";
 import { join } from "node:path";
 import type { AtriumConfig } from "./config";
@@ -9,8 +9,6 @@ export interface SummaryResult {
   asOf: number; // source transcript mtime the summary reflects
   cached: boolean;
 }
-
-const inFlight = new Map<string, Promise<SummaryResult>>();
 
 // Bump when the prompt changes — cached summaries from older prompts regenerate.
 const PROMPT_VERSION = 2;
@@ -31,7 +29,7 @@ function extractText(content: unknown): string | undefined {
 }
 
 /** Condense a transcript to alternating User/Assistant text, capped in size. */
-async function extractConversation(path: string): Promise<string> {
+export async function extractConversation(path: string): Promise<string> {
   const raw = await readFile(path, "utf8");
   const turns: string[] = [];
   for (const line of raw.split("\n")) {
@@ -82,7 +80,7 @@ async function awaitBgResult(
   const deadline = Date.now() + cfg.summarize.timeoutMs;
   let path: string | undefined;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 500));
     if (!path) {
       try {
         const f = (await readdir(dir)).find(
@@ -158,7 +156,16 @@ async function runSummarize(
 
   mkdirSync(cfg.summarize.scratchDir, { recursive: true });
   const proc = Bun.spawn(
-    [cfg.summarize.claudeBin, "--bg", "--model", cfg.summarize.model, prompt],
+    [
+      cfg.summarize.claudeBin,
+      "--bg",
+      "--model",
+      cfg.summarize.model,
+      "--effort",
+      cfg.summarize.effort,
+      ...cfg.summarize.fastStartArgs,
+      prompt,
+    ],
     { cwd: cfg.summarize.scratchDir, stdout: "pipe", stderr: "pipe" },
   );
   const out = await new Response(proc.stdout).text();
@@ -191,7 +198,94 @@ async function runSummarize(
   return result;
 }
 
-export async function summarizeSession(
+// ---- queue --------------------------------------------------------------
+// Clicks past maxInFlight queue (FIFO) instead of blocking. A memory floor
+// holds dispatch when the box is tight, and a depth cap protects Atrium's own
+// runtime from unbounded pile-up. Per-session dedupe: one job per session.
+
+interface Pending {
+  promise: Promise<SummaryResult>;
+  resolve: (r: SummaryResult) => void;
+  reject: (e: unknown) => void;
+}
+
+const inFlight = new Map<string, Promise<SummaryResult>>();
+const queued = new Map<string, Pending>();
+const order: string[] = []; // FIFO of queued session ids
+let pumpTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Live box memory in MB from /proc/meminfo. Read each dispatch so the limits
+ *  track the actual hardware — upsize or downsize the box and they follow,
+ *  no config edit needed. */
+function memInfo(): { totalMb: number; availMb: number } {
+  try {
+    const raw = readFileSync("/proc/meminfo", "utf8");
+    const total = Number(raw.match(/MemTotal:\s+(\d+)/)?.[1] ?? 0) / 1024;
+    const avail = Number(raw.match(/MemAvailable:\s+(\d+)/)?.[1] ?? 0) / 1024;
+    return { totalMb: Math.round(total), availMb: Math.round(avail) };
+  } catch {
+    return { totalMb: 0, availMb: Number.MAX_SAFE_INTEGER };
+  }
+}
+
+/** Concurrency derived from live total RAM: how many ~perJobMb jobs fit in the
+ *  share of memory summaries are allowed, clamped to [2, cap]. Scales with the box. */
+function deriveMaxInFlight(cfg: AtriumConfig, totalMb: number): number {
+  if (!totalMb) return 2;
+  const derived = Math.floor(
+    (totalMb * cfg.summarize.ramShare) / cfg.summarize.perJobMb,
+  );
+  return Math.max(2, Math.min(cfg.summarize.maxInFlightCap, derived));
+}
+
+/** Live view of the queue, for the snapshot. */
+export function summarizeState(): { active: string[]; queued: string[] } {
+  return { active: [...inFlight.keys()], queued: [...order] };
+}
+
+/** Derived limits for the current box — for the startup log. */
+export function summarizeLimits(cfg: AtriumConfig): {
+  maxInFlight: number;
+  totalMb: number;
+  reserveMb: number;
+} {
+  const { totalMb } = memInfo();
+  return {
+    maxInFlight: deriveMaxInFlight(cfg, totalMb),
+    totalMb,
+    reserveMb: Math.round(totalMb * cfg.summarize.memReservePct),
+  };
+}
+
+function pump(cfg: AtriumConfig) {
+  if (pumpTimer) {
+    clearTimeout(pumpTimer);
+    pumpTimer = null;
+  }
+  while (order.length > 0) {
+    const { totalMb, availMb } = memInfo();
+    if (inFlight.size >= deriveMaxInFlight(cfg, totalMb)) break;
+    // Hold the whole queue when free RAM dips below the reserve; retry shortly.
+    if (availMb < totalMb * cfg.summarize.memReservePct) {
+      pumpTimer = setTimeout(() => pump(cfg), 2500);
+      return;
+    }
+    const sessionId = order.shift()!;
+    const pending = queued.get(sessionId)!;
+    queued.delete(sessionId);
+    const task = produceSummary(cfg, sessionId)
+      .then((r) => pending.resolve(r))
+      .catch((e) => pending.reject(e))
+      .finally(() => {
+        inFlight.delete(sessionId);
+        pump(cfg);
+      });
+    inFlight.set(sessionId, task as Promise<SummaryResult>);
+  }
+}
+
+/** Resolve a session to a summary: cache hit, or a fresh bg generation. */
+async function produceSummary(
   cfg: AtriumConfig,
   sessionId: string,
 ): Promise<SummaryResult> {
@@ -200,32 +294,66 @@ export async function summarizeSession(
   if (!sourcePath || sourceMtime === undefined) {
     throw new Error("unknown session");
   }
+  const cached = readCache(cfg, sessionId, sourceMtime);
+  if (cached) return cached;
+  return runSummarize(cfg, sessionId, sourcePath, sourceMtime);
+}
 
-  // serve cache when the source hasn't moved
+/** Valid cached summary for the current source mtime, or null. */
+function readCache(
+  cfg: AtriumConfig,
+  sessionId: string,
+  sourceMtime: number,
+): SummaryResult | null {
   const cachePath = join(cfg.summarize.cacheDir, `${sessionId}.json`);
-  if (existsSync(cachePath)) {
-    try {
-      const c = JSON.parse(await readFile(cachePath, "utf8"));
-      if (
-        c.sourceMtimeMs === sourceMtime &&
-        c.summary &&
-        c.promptV === PROMPT_VERSION
-      ) {
-        return { summary: c.summary, asOf: c.sourceMtimeMs, cached: true };
-      }
-    } catch {
-      // corrupt cache — fall through to regenerate
+  if (!existsSync(cachePath)) return null;
+  try {
+    const c = JSON.parse(readFileSync(cachePath, "utf8"));
+    if (
+      c.sourceMtimeMs === sourceMtime &&
+      c.summary &&
+      c.promptV === PROMPT_VERSION
+    ) {
+      return { summary: c.summary, asOf: c.sourceMtimeMs, cached: true };
     }
+  } catch {
+    // corrupt cache — regenerate
+  }
+  return null;
+}
+
+export async function summarizeSession(
+  cfg: AtriumConfig,
+  sessionId: string,
+): Promise<SummaryResult> {
+  const sourceMtime = transcriptMtimeFor(sessionId);
+  if (!transcriptPathFor(sessionId) || sourceMtime === undefined) {
+    throw new Error("unknown session");
   }
 
-  const existing = inFlight.get(sessionId);
-  if (existing) return existing;
-  if (inFlight.size >= cfg.summarize.maxInFlight) {
-    throw new Error("summarizer busy — try again in a moment");
+  // instant path: fresh cached summary, never touches the queue
+  const cached = readCache(cfg, sessionId, sourceMtime);
+  if (cached) return cached;
+
+  // dedupe: one job per session, whether running or waiting
+  const running = inFlight.get(sessionId);
+  if (running) return running;
+  const waiting = queued.get(sessionId);
+  if (waiting) return waiting.promise;
+
+  // protect Atrium's own runtime from unbounded pile-up
+  if (inFlight.size + order.length >= cfg.summarize.maxQueue) {
+    throw new Error("summarizer queue is full — try again shortly");
   }
-  const p = runSummarize(cfg, sessionId, sourcePath, sourceMtime).finally(() =>
-    inFlight.delete(sessionId),
-  );
-  inFlight.set(sessionId, p);
-  return p;
+
+  let resolve!: (r: SummaryResult) => void;
+  let reject!: (e: unknown) => void;
+  const promise = new Promise<SummaryResult>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  queued.set(sessionId, { promise, resolve, reject });
+  order.push(sessionId);
+  pump(cfg);
+  return promise;
 }

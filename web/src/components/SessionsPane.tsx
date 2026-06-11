@@ -1,11 +1,22 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import type { SessionInfo, ChildProc } from "../../../shared/types";
+import type { SessionInfo, ChildProc, Snapshot } from "../../../shared/types";
 import { basename, fmtKb, fmtTokens, relTime, tildify } from "../lib/format";
 import { Bar, Chip, Dot, Panel, SectionTitle } from "./ui";
 import { SummaryBlock } from "./SummaryBlock";
 
 const CONTEXT_MAX = 1_000_000;
+
+type QueueStatus = "queued" | "active" | undefined;
+
+function statusOf(
+  sessionId: string,
+  summarize: Snapshot["summarize"],
+): QueueStatus {
+  if (summarize?.active.includes(sessionId)) return "active";
+  if (summarize?.queued.includes(sessionId)) return "queued";
+  return undefined;
+}
 
 function entryLabel(s: SessionInfo): string {
   if (s.entrypoint === "claude-desktop") return "desktop";
@@ -84,8 +95,10 @@ function ChildList({ children }: { children: ChildProc[] }) {
           className="flex items-baseline gap-2 font-mono text-[11px] text-ink-mute"
         >
           <span className="text-gold-dim">·</span>
-          <span className="min-w-0 flex-1 truncate text-ink-dim">
-            {c.command}
+          <span
+            className={`min-w-0 flex-1 truncate ${c.name ? "font-sans text-[12px] text-ink-dim" : "text-ink-dim"}`}
+          >
+            {c.name ?? c.command}
           </span>
           <span className="shrink-0 tabular-nums">
             pid {c.pid} · up {c.etime} · {fmtKb(c.rssKb)} rss
@@ -97,7 +110,15 @@ function ChildList({ children }: { children: ChildProc[] }) {
   );
 }
 
-function LiveCard({ s, now }: { s: SessionInfo; now: number }) {
+function LiveCard({
+  s,
+  now,
+  queueStatus,
+}: {
+  s: SessionInfo;
+  now: number;
+  queueStatus: QueueStatus;
+}) {
   const needsYou = s.state === "awaiting" || s.state === "approval";
   return (
     <motion.div
@@ -147,6 +168,7 @@ function LiveCard({ s, now }: { s: SessionInfo; now: number }) {
           sessionId={s.sessionId}
           lastActivityAt={s.lastActivityAt}
           now={now}
+          queueStatus={queueStatus}
         />
       </Panel>
     </motion.div>
@@ -204,7 +226,15 @@ function HeadlessGroup({ list, now }: { list: SessionInfo[]; now: number }) {
   );
 }
 
-function RecentRow({ s, now }: { s: SessionInfo; now: number }) {
+function RecentRow({
+  s,
+  now,
+  queueStatus,
+}: {
+  s: SessionInfo;
+  now: number;
+  queueStatus: QueueStatus;
+}) {
   return (
     <div className="border-b border-line-soft px-4 py-2.5 last:border-b-0">
       <div className="flex items-center gap-3">
@@ -236,6 +266,7 @@ function RecentRow({ s, now }: { s: SessionInfo; now: number }) {
           sessionId={s.sessionId}
           lastActivityAt={s.lastActivityAt}
           now={now}
+          queueStatus={queueStatus}
         />
       </div>
     </div>
@@ -259,9 +290,11 @@ function useIsWide(): boolean {
 export function SessionsPane({
   sessions,
   now,
+  summarize,
 }: {
   sessions: SessionInfo[];
   now: number;
+  summarize: Snapshot["summarize"];
 }) {
   const isWide = useIsWide();
   const liveInteractive = sessions.filter((s) => s.live && !s.headless);
@@ -308,7 +341,7 @@ export function SessionsPane({
                 <div key={i} className="space-y-3">
                   <AnimatePresence mode="popLayout">
                     {col.map((s) => (
-                      <LiveCard key={s.sessionId} s={s} now={now} />
+                      <LiveCard key={s.sessionId} s={s} now={now} queueStatus={statusOf(s.sessionId, summarize)} />
                     ))}
                   </AnimatePresence>
                 </div>
@@ -330,7 +363,7 @@ export function SessionsPane({
                 <div key={i} className="space-y-3">
                   <AnimatePresence mode="popLayout">
                     {col.map((s) => (
-                      <LiveCard key={s.sessionId} s={s} now={now} />
+                      <LiveCard key={s.sessionId} s={s} now={now} queueStatus={statusOf(s.sessionId, summarize)} />
                     ))}
                   </AnimatePresence>
                 </div>
@@ -353,7 +386,7 @@ export function SessionsPane({
               recent
             </div>
             {visible.map((s) => (
-              <RecentRow key={s.sessionId} s={s} now={now} />
+              <RecentRow key={s.sessionId} s={s} now={now} queueStatus={statusOf(s.sessionId, summarize)} />
             ))}
             {recentHeadless.length > 0 && (
               <div className="flex items-center gap-3 border-b border-line-soft px-4 py-2.5 last:border-b-0">

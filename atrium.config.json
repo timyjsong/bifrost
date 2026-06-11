@@ -9,10 +9,16 @@
   "sessions": { "historyDays": 14, "maxHistory": 60 },
   "summarize": {
     "claudeBin": "/home/you/.local/bin/claude",
-    "model": "haiku",
+    "model": "sonnet",
+    "effort": "low",
+    "fastStartArgs": ["--strict-mcp-config"],
     "scratchDir": "~/.cache/atrium/bg",
     "cacheDir": "~/.cache/atrium/summaries",
-    "maxInFlight": 2,
+    "perJobMb": 250,
+    "ramShare": 0.33,
+    "memReservePct": 0.15,
+    "maxInFlightCap": 12,
+    "maxQueue": 40,
     "timeoutMs": 120000
   }
 }

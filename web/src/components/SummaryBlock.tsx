@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import Markdown from "react-markdown";
 import { relTime } from "../lib/format";
@@ -13,13 +13,28 @@ export function SummaryBlock({
   sessionId,
   lastActivityAt,
   now,
+  queueStatus,
 }: {
   sessionId: string;
   lastActivityAt: number;
   now: number;
+  queueStatus?: "queued" | "active";
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [open, setOpen] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const startRef = useRef(0);
+
+  useEffect(() => {
+    if (phase.kind !== "loading") return;
+    startRef.current = Date.now();
+    setElapsed(0);
+    const t = setInterval(
+      () => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)),
+      1000,
+    );
+    return () => clearInterval(t);
+  }, [phase.kind]);
 
   async function run() {
     setPhase({ kind: "loading" });
@@ -58,7 +73,9 @@ export function SummaryBlock({
         >
           <span className="text-gold/70">✦</span>
           {phase.kind === "loading"
-            ? "summarizing…"
+            ? queueStatus === "queued"
+              ? `queued… ${elapsed}s`
+              : `summarizing… ${elapsed}s`
             : phase.kind === "done"
               ? open
                 ? "hide summary"
@@ -88,7 +105,9 @@ export function SummaryBlock({
               {phase.kind === "loading" && (
                 <div className="flex items-center gap-2 text-[12px] text-ink-mute">
                   <span className="pulse-dot inline-block size-[6px] rounded-full bg-gold" />
-                  haiku is reading the session…
+                  {queueStatus === "queued"
+                    ? "waiting for a free slot…"
+                    : "reading the session… usually 10–16s"}
                 </div>
               )}
               {phase.kind === "error" && (

@@ -7,7 +7,13 @@ import {
 } from "./collectors/sessions";
 import { collectProjects } from "./collectors/projects";
 import { collectSystem } from "./collectors/system";
-import { summarizeSession } from "./summarize";
+import {
+  summarizeSession,
+  summarizeState,
+  summarizeLimits,
+} from "./summarize";
+import { taskIdForPid, resolveTaskName } from "./tasknames";
+import { transcriptPathFor } from "./collectors/sessions";
 import type {
   Snapshot,
   ProjectInfo,
@@ -131,13 +137,36 @@ async function fastTick() {
       collectSessions(cfg),
       collectSystem(),
     ]);
+    const descByPid = new Map<number, Set<number>>();
+    for (const s of sessRes.sessions) {
+      if (s.live && s.pid) {
+        descByPid.set(s.pid, descendantsOf(s.pid, sysRes.pidTree));
+      }
+    }
     for (const s of sessRes.sessions) {
       const sig = sessRes.signals.get(s.sessionId);
       if (!sig || !s.pid) continue;
-      const descendants = descendantsOf(s.pid, sysRes.pidTree);
+      // A live claude whose pid sits inside another live session's process
+      // tree is spawned automation (claude-in-claude), whatever its
+      // entrypoint claims — fold it in with the headless runs.
+      for (const [pid, desc] of descByPid) {
+        if (pid !== s.pid && desc.has(s.pid)) {
+          s.headless = true;
+          break;
+        }
+      }
+      const descendants = descByPid.get(s.pid) ?? new Set();
       s.childProcs = descendants.size;
       s.children = leafChildren(descendants, sysRes.pidTree, sysRes.allProcs);
-      s.state = deriveState(s, sig, descendants.size);
+      for (const c of s.children) {
+        const taskId = taskIdForPid(c.pid);
+        if (taskId) {
+          c.name = await resolveTaskName(taskId, transcriptPathFor(s.sessionId));
+        }
+      }
+      s.state = s.headless
+        ? undefined
+        : deriveState(s, sig, descendants.size);
       if (s.state !== "working") s.nowDoing = undefined; // snippet only meaningful mid-work
     }
     let bundleId: number | undefined;
@@ -149,6 +178,7 @@ async function fastTick() {
     snapshot = {
       generatedAt: Date.now(),
       bundleId,
+      summarize: summarizeState(),
       projects,
       sessions: sessRes.sessions,
       system: sysRes.info,
@@ -310,3 +340,8 @@ setInterval(fastTick, cfg.refresh.fastMs);
 setInterval(slowTick, cfg.refresh.slowMs);
 
 console.log(`[atrium] watching from http://${server.hostname}:${server.port}`);
+const lim = summarizeLimits(cfg);
+console.log(
+  `[atrium] summarize: ${lim.maxInFlight} concurrent slots, ${lim.reserveMb}MB reserve floor ` +
+    `(derived from ${(lim.totalMb / 1024).toFixed(1)}G box)`,
+);

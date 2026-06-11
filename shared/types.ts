@@ -28,6 +28,7 @@ export interface ChildProc {
   rssKb: number;
   cpu: number;
   command: string;
+  name?: string; // the description the session gave this background task
 }
 
 export interface ProjectGit {
@@ -76,6 +77,8 @@ export interface SystemInfo {
   hostname: string;
   uptimeSec: number;
   load: [number, number, number];
+  cpuPct?: number; // real utilization from /proc/stat deltas (first tick: undefined)
+  disk: { totalKb: number; freeKb: number }; // root filesystem
   cores: number;
   mem: {
     totalKb: number;
@@ -92,6 +95,7 @@ export interface SystemInfo {
 export interface Snapshot {
   generatedAt: number;
   bundleId?: number; // dist/index.html mtime — frontend reloads when it changes
+  summarize?: { active: string[]; queued: string[] }; // session ids being summarized
   projects: ProjectInfo[];
   sessions: SessionInfo[];
   system: SystemInfo;
