@@ -8,6 +8,7 @@ export interface SessionInfo {
   headless?: boolean; // entrypoint is sdk-driven (eval probes, programmatic runs)
   cwd: string;
   title?: string;
+  customTitle?: string; // the name the user gave the session (rename)
   gitBranch?: string;
   model?: string;
   startedAt?: number; // epoch ms
@@ -17,6 +18,10 @@ export interface SessionInfo {
   // live-session activity state (derived; live interactive sessions only)
   state?: "awaiting" | "approval" | "paused" | "working";
   lastPromptAt?: number; // when the user last typed — anchors the in-progress timer
+  // where the session lives (derived from /proc + tmux; live interactive only)
+  tmuxSession?: string; // tmux session name, if running inside a pane
+  tmuxAttached?: boolean; // that tmux session has a client attached right now
+  overSsh?: boolean; // hangs off a live sshd — dies with the connection
   childProcs?: number;
   children?: ChildProc[]; // leaf subprocesses currently running under this session
   nowDoing?: string; // last assistant text snippet
@@ -26,7 +31,7 @@ export interface ChildProc {
   pid: number;
   etime: string;
   rssKb: number;
-  cpu: number;
+  cpu: number; // % of total box CPU (all cores = 100), since last tick
   command: string;
   name?: string; // the description the session gave this background task
 }
@@ -54,8 +59,9 @@ export interface ProcInfo {
   ppid: number;
   user: string;
   rssKb: number;
-  cpu: number;
+  cpu: number; // % of total box CPU (all cores = 100), since last tick
   etime: string;
+  tty?: string; // controlling terminal ("pts/2"), if any
   command: string;
   isClaude: boolean;
 }

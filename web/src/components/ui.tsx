@@ -44,7 +44,7 @@ export function Chip({
   mono = false,
 }: {
   children: ReactNode;
-  tone?: "mute" | "gold" | "auto" | "danger";
+  tone?: "mute" | "gold" | "auto" | "danger" | "tmux" | "ssh" | "desk";
   mono?: boolean;
 }) {
   const tones: Record<string, string> = {
@@ -52,6 +52,10 @@ export function Chip({
     gold: "border-gold-dim/60 text-gold",
     auto: "border-auto/40 text-auto",
     danger: "border-danger/50 text-danger",
+    // residence family: tinted fill marks "where it runs" at a glance
+    tmux: "border-tmux/40 bg-tmux/10 text-tmux",
+    ssh: "border-ssh/40 bg-ssh/10 text-ssh",
+    desk: "border-desk/40 bg-desk/10 text-desk",
   };
   return (
     <span

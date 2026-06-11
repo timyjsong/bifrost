@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { readdir, stat, open } from "node:fs/promises";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
 import type { SessionInfo } from "../../shared/types";
+import { canonCommand, isPrintCmdline, type ToolCall } from "../derive";
+import { fullArgsForPid } from "../tasknames";
 import type { AtriumConfig } from "../config";
 
 interface LivePidFile {
@@ -20,6 +22,8 @@ interface LivePidFile {
 export interface SessionSignals {
   lastEntry?: TailEntry;
   openTools: number;
+  /** Rolling command -> description index for naming child processes. */
+  callIndex?: Map<string, string>;
   cpuQuietMs?: number;
   pidStatus?: string;
   pidStatusAgeMs?: number;
@@ -32,6 +36,7 @@ interface TranscriptHead {
   gitBranch?: string;
   startedAt?: number;
   title?: string;
+  customTitle?: string;
   entrypoint?: string;
   sidechain: boolean;
 }
@@ -48,6 +53,8 @@ interface TranscriptTail {
   lastTimestamp?: number;
   lastEntry?: TailEntry;
   openTools: number;
+  calls?: ToolCall[]; // every described tool call in the window, open or done
+  customTitle?: string; // last user-set session name seen in the window
   nowDoing?: string;
   lastPromptAt?: number;
 }
@@ -78,6 +85,66 @@ const transcriptCache = new Map<string, TranscriptCacheEntry>();
 
 // pid -> last CPU sample, for "is this process actually computing" detection.
 const cpuTrack = new Map<number, { jiffies: number; quietSince: number }>();
+
+// Rolling per-session naming state. The call index accumulates command ->
+// description across ticks (and subagent sidechains), so a process whose
+// tool call scrolled out of the tail window — or finished — keeps its name.
+const CALL_INDEX_MAX = 300;
+const SIDECHAIN_FRESH_MS = 30 * 60_000;
+const SIDECHAIN_TAIL_BYTES = 64 * 1024;
+const callIndexBySession = new Map<string, Map<string, string>>();
+const titleBySession = new Map<string, string>();
+const sidechainSeen = new Map<string, number>(); // agent file path -> parsed mtime
+
+function mergeCalls(sessionId: string, calls: ToolCall[] | undefined): void {
+  if (!calls?.length) return;
+  let idx = callIndexBySession.get(sessionId);
+  if (!idx) callIndexBySession.set(sessionId, (idx = new Map()));
+  for (const c of calls) {
+    if (!c.command || !c.description) continue;
+    const key = canonCommand(c.command);
+    if (key.length < 8) continue; // too generic to ever match safely
+    idx.delete(key); // re-insert so map order tracks recency
+    idx.set(key, c.description);
+  }
+  while (idx.size > CALL_INDEX_MAX) {
+    idx.delete(idx.keys().next().value!);
+  }
+}
+
+/**
+ * Subagent tool calls live in <project>/<sessionId>/subagents/agent-*.jsonl,
+ * not in the main transcript — without this, anything a subagent spawns shows
+ * raw command text. Tails freshly-modified files once per mtime.
+ */
+async function scanSidechains(
+  sessionId: string,
+  transcriptPath: string,
+): Promise<void> {
+  const dir = join(dirname(transcriptPath), sessionId, "subagents");
+  let files: string[] = [];
+  try {
+    files = await readdir(dir);
+  } catch {
+    return; // no subagents for this session
+  }
+  const now = Date.now();
+  for (const f of files) {
+    if (!f.endsWith(".jsonl")) continue;
+    const path = join(dir, f);
+    try {
+      const st = await stat(path);
+      if (now - st.mtimeMs > SIDECHAIN_FRESH_MS) continue;
+      if (sidechainSeen.get(path) === st.mtimeMs) continue;
+      sidechainSeen.set(path, st.mtimeMs);
+      const start = Math.max(0, st.size - SIDECHAIN_TAIL_BYTES);
+      const tail = parseTail(await readChunk(path, start, SIDECHAIN_TAIL_BYTES));
+      mergeCalls(sessionId, tail.calls);
+    } catch {
+      // file vanished mid-scan
+    }
+  }
+}
 
 /**
  * Read /proc/<pid>/stat: liveness (with pid-reuse guard via starttime) plus
@@ -113,7 +180,7 @@ function trackCpu(pid: number, jiffies: number, now: number): number {
   return now - quietSince;
 }
 
-function isHeadless(entrypoint?: string): boolean | undefined {
+export function isHeadless(entrypoint?: string): boolean | undefined {
   return entrypoint ? /sdk/.test(entrypoint) : undefined;
 }
 
@@ -150,7 +217,7 @@ async function readChunk(
   }
 }
 
-function parseHead(chunk: string, fileSessionId: string): TranscriptHead | null {
+export function parseHead(chunk: string, fileSessionId: string): TranscriptHead | null {
   const head: TranscriptHead = { sessionId: fileSessionId, sidechain: false };
   let foundUser = false;
   for (const line of chunk.split("\n")) {
@@ -162,6 +229,9 @@ function parseHead(chunk: string, fileSessionId: string): TranscriptHead | null 
       continue; // truncated final line of the chunk
     }
     if (d.isSidechain === true) head.sidechain = true;
+    if (d.type === "custom-title" && typeof d.customTitle === "string") {
+      head.customTitle = d.customTitle;
+    }
     if (d.type === "user" && d.message?.role === "user") {
       head.cwd = d.cwd ?? head.cwd;
       head.gitBranch = d.gitBranch ?? head.gitBranch;
@@ -180,10 +250,11 @@ function parseHead(chunk: string, fileSessionId: string): TranscriptHead | null 
   return head.cwd || head.title ? head : null;
 }
 
-function parseTail(chunk: string): TranscriptTail {
+export function parseTail(chunk: string): TranscriptTail {
   const tail: TranscriptTail = { openTools: 0 };
   const toolUses = new Set<string>();
   const toolResults = new Set<string>();
+  const calls: ToolCall[] = [];
   // Forward pass: later lines overwrite, so the final values reflect the file end.
   // Tool accounting within the window is sound — results always follow their use.
   for (const line of chunk.split("\n")) {
@@ -195,6 +266,9 @@ function parseTail(chunk: string): TranscriptTail {
       continue; // truncated first/last line of the window
     }
     if (d.timestamp) tail.lastTimestamp = Date.parse(d.timestamp);
+    if (d.type === "custom-title" && typeof d.customTitle === "string") {
+      tail.customTitle = d.customTitle;
+    }
     const m = d.message;
     if (d.type === "assistant" && m?.role === "assistant") {
       if (m.usage?.input_tokens !== undefined) {
@@ -210,6 +284,15 @@ function parseTail(chunk: string): TranscriptTail {
         if (c?.type === "tool_use" && c.id) {
           toolUses.add(c.id);
           hasToolUse = true;
+          if (typeof c.input?.description === "string") {
+            // every described call, open or done — a process can outlive
+            // its tool call (daemons, &-backgrounded work)
+            calls.push({
+              command:
+                typeof c.input.command === "string" ? c.input.command : undefined,
+              description: c.input.description,
+            });
+          }
         }
         if (c?.type === "text" && typeof c.text === "string" && c.text.trim()) {
           tail.nowDoing = cleanTitle(c.text).slice(0, 120);
@@ -239,6 +322,7 @@ function parseTail(chunk: string): TranscriptTail {
     }
   }
   tail.openTools = [...toolUses].filter((id) => !toolResults.has(id)).length;
+  tail.calls = calls;
   return tail;
 }
 
@@ -320,8 +404,11 @@ async function fullSweep(claudeDir: string): Promise<void> {
 
 async function collectLive(
   claudeDir: string,
-): Promise<Map<string, LivePidFile & { cpuQuietMs: number }>> {
-  const live = new Map<string, LivePidFile & { cpuQuietMs: number }>();
+): Promise<Map<string, LivePidFile & { cpuQuietMs: number; printMode: boolean }>> {
+  const live = new Map<
+    string,
+    LivePidFile & { cpuQuietMs: number; printMode: boolean }
+  >();
   let files: string[] = [];
   try {
     files = await readdir(join(claudeDir, "sessions"));
@@ -341,6 +428,9 @@ async function collectLive(
       live.set(d.sessionId, {
         ...d,
         cpuQuietMs: trackCpu(d.pid, proc.jiffies, now),
+        // pid files of desktop-spawned background agents claim
+        // kind=interactive — the cmdline is the honest signal
+        printMode: isPrintCmdline(fullArgsForPid(d.pid)),
       });
     } catch {
       // unreadable/partial pid file — treat as not live
@@ -411,10 +501,15 @@ export async function collectSessions(
     const cwd = lp?.cwd ?? entry.head.cwd ?? "";
     if (cwd === scratch || cwd.startsWith(scratch + "/")) continue;
     seen.add(sessionId);
+    const seenTitle = entry.tail.customTitle ?? entry.head?.customTitle;
+    if (seenTitle) titleBySession.set(sessionId, seenTitle);
     if (lp) {
+      mergeCalls(sessionId, entry.tail.calls);
+      await scanSidechains(sessionId, fs.path);
       signals.set(sessionId, {
         lastEntry: entry.tail.lastEntry,
         openTools: entry.tail.openTools,
+        callIndex: callIndexBySession.get(sessionId),
         cpuQuietMs: lp.cpuQuietMs,
         pidStatus: lp.status,
         pidStatusAgeMs: lp.statusUpdatedAt
@@ -430,9 +525,11 @@ export async function collectSessions(
       kind: lp?.kind,
       status: lp?.status,
       entrypoint: lp?.entrypoint ?? entry.head.entrypoint,
-      headless: isHeadless(lp?.entrypoint ?? entry.head.entrypoint),
+      headless:
+        lp?.printMode || isHeadless(lp?.entrypoint ?? entry.head.entrypoint),
       cwd: lp?.cwd ?? entry.head.cwd ?? "",
       title: entry.head.title,
+      customTitle: titleBySession.get(sessionId),
       gitBranch: entry.head.gitBranch,
       model: entry.tail.model,
       startedAt: lp?.startedAt ?? entry.head.startedAt,
@@ -463,7 +560,7 @@ export async function collectSessions(
       kind: lp.kind,
       status: lp.status,
       entrypoint: lp.entrypoint,
-      headless: isHeadless(lp.entrypoint),
+      headless: lp.printMode || isHeadless(lp.entrypoint),
       cwd: lp.cwd,
       startedAt: lp.startedAt,
       lastActivityAt: lp.startedAt,
@@ -488,6 +585,18 @@ export async function collectSessions(
   const history = [...deadInteractive, ...deadHeadless].sort(
     (a, b) => b.lastActivityAt - a.lastActivityAt,
   );
+  // Naming state only matters while a session lives; titles stay sticky
+  // for any transcript still indexed.
+  for (const sid of callIndexBySession.keys()) {
+    if (!live.has(sid)) callIndexBySession.delete(sid);
+  }
+  for (const sid of titleBySession.keys()) {
+    if (!fileIndex.has(sid)) titleBySession.delete(sid);
+  }
+  const staleMtime = Date.now() - SIDECHAIN_FRESH_MS;
+  for (const [path, mtime] of sidechainSeen) {
+    if (mtime < staleMtime) sidechainSeen.delete(path);
+  }
   const livePids = new Map<string, number>();
   for (const [sid, lp] of live) livePids.set(sid, lp.pid);
   return { sessions: [...liveRows, ...history], signals, livePids };

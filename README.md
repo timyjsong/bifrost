@@ -44,10 +44,34 @@ deploy/atrium.service systemd unit
   pid-file `status` when fresh. States: `awaiting` (turn over, nothing running — the NEEDS YOU
   group), `approval` (dangling tool call, no children, CPU-quiet — likely a permission prompt),
   `paused` (turn over but spawned processes still out), `working`.
+- **Residence + identity** (v1.2): tmux membership by matching the pid's tty against
+  `tmux list-panes` (session name + attached state); direct-ssh by live sshd ancestor; session
+  names from transcript `custom-title` entries. Subprocesses are named from a rolling
+  per-session index of described tool calls (main transcript + subagent sidechains) matched
+  against full /proc cmdlines up the wrapper chain; bg tasks via stdout fd → task output.
+  Per-process CPU is instantaneous box-share (all cores = 100) from jiffy deltas per tick.
+- **Background agents** (v1.2): a live `claude -p` (cmdline check — pid files of
+  desktop-spawned agents falsely claim interactive) is never shown as an interactive session;
+  when its stdout links to `…/<ownerSession>/tasks/<id>.output` it's absorbed onto the owner's
+  card as a named child.
 - **Summaries** (v1.1): `POST /api/sessions/:id/summarize` condenses the transcript server-side,
   dispatches `claude --bg --model haiku`, polls the bg transcript for the result, `claude rm`s
   the session, and caches to `~/.cache/atrium/summaries` keyed by source mtime. Known limitation:
   a *detached* daemon (nohup, reparented to init) is invisible to the child-process check.
+
+## Tests
+
+`bun run check` (repo root) runs the unit suite plus server and web typechecks. The suite
+covers the logic layer — transcript parsing, state derivation, process trees, the summarize
+queue (with injected seams), spec-derived scaling, selectors, formatters. Views are verified
+by eyeball; they're taste, not logic.
+
+## Swappable views
+
+Session presentation is decoupled from data: `web/src/lib/selectors.ts` shapes the snapshot
+into groups, and `web/src/views/sessions/` holds the presentations (`cards`, `table`) behind
+a registry. A new view (graph, timeline, …) is one component + one registry line. The
+toggle persists per-browser.
 
 ## Run
 

@@ -23,6 +23,16 @@
   --color-gold-dim: #8f7440;
   --color-danger: #e5484d;
   --color-auto: #8d86b3; /* headless / automation */
+
+  /* session residence (where it runs) */
+  --color-tmux: #87a987; /* sage — tmux's green, muted to fit the room */
+  --color-ssh: #74a8a1; /* teal — bare remote link */
+  --color-desk: #8da3c4; /* steel blue — desktop app */
+
+  /* model families (glyph accents on the model pill; fable uses gold) */
+  --color-opus: #a292c9;
+  --color-sonnet: #7fa3c0;
+  --color-haiku: #79b3a4;
 }
 
 html {

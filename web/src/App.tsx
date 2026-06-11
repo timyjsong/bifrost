@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
 import { useNow, useSnapshot } from "./lib/useSnapshot";
 import { fmtKb, fmtUptime } from "./lib/format";
+import { pressureColor } from "./lib/pressure";
 import { Dot } from "./components/ui";
 import { SessionsPane } from "./components/SessionsPane";
 import { ProjectsPane } from "./components/ProjectsPane";
@@ -59,33 +60,6 @@ function Clock({ now }: { now: number }) {
       {d.toLocaleTimeString(undefined, { hour12: false })}
     </span>
   );
-}
-
-/**
- * Green→red gradient where the color tracks the percentage intuitively:
- * 0% green, ~50% orange, 100% red. Raw hue interpolation reads too green in
- * the middle (hue 70 still looks green), so anchor stops pin the midpoint
- * to true orange and lerp between them.
- */
-function pressureColor(ratio: number): string {
-  const r = Math.max(0, Math.min(1, ratio));
-  const stops: [number, number][] = [
-    [0, 140], // green
-    [0.25, 95], // yellow-green
-    [0.5, 38], // orange
-    [0.75, 16], // red-orange
-    [1, 0], // red
-  ];
-  let hue = 0;
-  for (let i = 1; i < stops.length; i++) {
-    const [r1, h1] = stops[i - 1];
-    const [r2, h2] = stops[i];
-    if (r <= r2) {
-      hue = h1 + ((r - r1) / (r2 - r1)) * (h2 - h1);
-      break;
-    }
-  }
-  return `hsl(${hue} 52% 53%)`;
 }
 
 function StatChip({

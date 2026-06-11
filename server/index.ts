@@ -1,10 +1,15 @@
 import { existsSync, statSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { loadConfig, repoRoot } from "./config";
+import { collectSessions } from "./collectors/sessions";
 import {
-  collectSessions,
-  type SessionSignals,
-} from "./collectors/sessions";
+  descendantsOf,
+  leafChildren,
+  cleanCommand,
+  deriveState,
+  deriveVia,
+  nameFromCallIndex,
+} from "./derive";
 import { collectProjects } from "./collectors/projects";
 import { collectSystem } from "./collectors/system";
 import {
@@ -12,15 +17,15 @@ import {
   summarizeState,
   summarizeLimits,
 } from "./summarize";
-import { taskIdForPid, resolveTaskName } from "./tasknames";
+import {
+  taskIdForPid,
+  resolveTaskName,
+  fullArgsForPid,
+  fdLink,
+  taskOwnerFromLink,
+} from "./tasknames";
 import { transcriptPathFor } from "./collectors/sessions";
-import type {
-  Snapshot,
-  ProjectInfo,
-  SessionInfo,
-  ProcInfo,
-  ChildProc,
-} from "../shared/types";
+import type { Snapshot, ProjectInfo } from "../shared/types";
 
 const cfg = loadConfig();
 const distDir = join(repoRoot, "web", "dist");
@@ -35,6 +40,7 @@ let snapshot: Snapshot = {
     hostname: "",
     uptimeSec: 0,
     load: [0, 0, 0],
+    disk: { totalKb: 0, freeKb: 0 },
     cores: 0,
     mem: { totalKb: 0, availKb: 0, swapTotalKb: 0, swapFreeKb: 0 },
     procs: [],
@@ -44,89 +50,6 @@ let snapshot: Snapshot = {
   },
 };
 let projects: ProjectInfo[] = [];
-
-/** All descendant pids of a root, from a [pid, ppid] snapshot. */
-function descendantsOf(root: number, pidTree: [number, number][]): Set<number> {
-  const children = new Map<number, number[]>();
-  for (const [pid, ppid] of pidTree) {
-    let arr = children.get(ppid);
-    if (!arr) children.set(ppid, (arr = []));
-    arr.push(pid);
-  }
-  const found = new Set<number>();
-  const stack = [root];
-  while (stack.length) {
-    for (const child of children.get(stack.pop()!) ?? []) {
-      found.add(child);
-      stack.push(child);
-    }
-  }
-  return found;
-}
-
-/**
- * The leaf processes among a session's descendants — the actual work
- * (shell-snapshot bash wrappers are parents of the real command, so leaves
- * are what's worth showing).
- */
-function leafChildren(
-  descendants: Set<number>,
-  pidTree: [number, number][],
-  allProcs: ProcInfo[],
-): ChildProc[] {
-  const parents = new Set(
-    pidTree.filter(([pid]) => descendants.has(pid)).map(([, ppid]) => ppid),
-  );
-  return allProcs
-    .filter((p) => descendants.has(p.pid) && !parents.has(p.pid))
-    .sort((a, b) => b.cpu - a.cpu || b.rssKb - a.rssKb)
-    .slice(0, 6)
-    .map((p) => ({
-      pid: p.pid,
-      etime: p.etime,
-      rssKb: p.rssKb,
-      cpu: p.cpu,
-      command: cleanCommand(p.command),
-    }));
-}
-
-/** Strip the shell-snapshot wrapper noise so the actual command shows. */
-function cleanCommand(cmd: string): string {
-  const evalMatch = cmd.match(/eval '(.+)/);
-  let c = evalMatch ? evalMatch[1] : cmd;
-  c = c.replace(/\s+/g, " ").trim();
-  return c.length > 90 ? c.slice(0, 87) + "…" : c;
-}
-
-/**
- * Derive a live interactive session's activity state from its signals.
- * Disk (transcript tail) is primary; children/CPU corroborate; the pid-file
- * status only demotes a false "awaiting" when it freshly says busy.
- */
-function deriveState(
-  s: SessionInfo,
-  sig: SessionSignals,
-  childProcs: number,
-): SessionInfo["state"] {
-  if (!s.live || s.headless || sig.kind === "bg") return undefined;
-  const statusFresh =
-    sig.pidStatusAgeMs !== undefined && sig.pidStatusAgeMs < 15_000;
-  if (sig.lastEntry === "assistant_done" && sig.openTools === 0) {
-    if (statusFresh && (sig.pidStatus === "busy" || sig.pidStatus === "shell")) {
-      return "working";
-    }
-    return childProcs > 0 ? "paused" : "awaiting";
-  }
-  if (
-    sig.openTools > 0 &&
-    childProcs === 0 &&
-    (sig.cpuQuietMs ?? 0) > 10_000 &&
-    !(statusFresh && sig.pidStatus === "busy")
-  ) {
-    return "approval";
-  }
-  return "working";
-}
 
 let fastBusy = false;
 async function fastTick() {
@@ -143,6 +66,7 @@ async function fastTick() {
         descByPid.set(s.pid, descendantsOf(s.pid, sysRes.pidTree));
       }
     }
+    const ppidOf = new Map(sysRes.pidTree);
     for (const s of sessRes.sessions) {
       const sig = sessRes.signals.get(s.sessionId);
       if (!sig || !s.pid) continue;
@@ -159,16 +83,78 @@ async function fastTick() {
       s.childProcs = descendants.size;
       s.children = leafChildren(descendants, sysRes.pidTree, sysRes.allProcs);
       for (const c of s.children) {
-        const taskId = taskIdForPid(c.pid);
+        // bg tasks: stdout fd -> tasks/<id>.output — on the leaf or any
+        // ancestor inside this session's subtree (wrappers may redirect)
+        let taskId: string | undefined;
+        const chain: number[] = [];
+        for (
+          let p: number | undefined = c.pid;
+          p !== undefined && descendants.has(p);
+          p = ppidOf.get(p)
+        ) {
+          chain.push(p);
+          taskId ??= taskIdForPid(p);
+        }
         if (taskId) {
           c.name = await resolveTaskName(taskId, transcriptPathFor(s.sessionId));
         }
+        // everything else: match the chain's full cmdlines (leaf first, then
+        // its wrappers) against the session's rolling call index
+        if (!c.name) {
+          const texts = chain
+            .map((p) => fullArgsForPid(p))
+            .filter((t): t is string => !!t);
+          c.name = nameFromCallIndex(texts, sig.callIndex);
+        }
+      }
+      if (!s.headless) {
+        const via = deriveVia(s.pid, sysRes.allProcs, sysRes.tmuxPanes);
+        s.tmuxSession = via.tmuxSession;
+        s.tmuxAttached = via.tmuxAttached;
+        s.overSsh = via.overSsh;
       }
       s.state = s.headless
         ? undefined
         : deriveState(s, sig, descendants.size);
       if (s.state !== "working") s.nowDoing = undefined; // snippet only meaningful mid-work
     }
+    // A live headless claude whose stdout feeds another live session's task
+    // output is that session's background agent — show it as a child on the
+    // owner's card, not as a session row of its own.
+    const procByPid = new Map(sysRes.allProcs.map((p) => [p.pid, p]));
+    const byId = new Map(sessRes.sessions.map((s) => [s.sessionId, s]));
+    const absorbed = new Set<string>();
+    for (const s of sessRes.sessions) {
+      if (!s.live || !s.headless || !s.pid) continue;
+      const link = fdLink(s.pid, 1);
+      const owner = link ? taskOwnerFromLink(link) : undefined;
+      const parent = owner ? byId.get(owner.ownerSessionId) : undefined;
+      if (!owner || !parent?.live || parent.sessionId === s.sessionId) continue;
+      absorbed.add(s.sessionId);
+      // already visible as a ps-tree child of the owner — don't double-list
+      if (parent.pid && descByPid.get(parent.pid)?.has(s.pid)) continue;
+      const proc = procByPid.get(s.pid);
+      parent.children = [
+        ...(parent.children ?? []),
+        {
+          pid: s.pid,
+          etime: proc?.etime ?? "",
+          rssKb: proc?.rssKb ?? 0,
+          cpu: proc?.cpu ?? 0,
+          command: cleanCommand(fullArgsForPid(s.pid) ?? "claude (agent)"),
+          // the agent's own first prompt is the best fallback name
+          name:
+            (await resolveTaskName(
+              owner.taskId,
+              transcriptPathFor(parent.sessionId),
+            )) ?? s.title,
+        },
+      ];
+      parent.childProcs = (parent.childProcs ?? 0) + 1;
+    }
+    const sessions = sessRes.sessions.filter(
+      (s) => !absorbed.has(s.sessionId),
+    );
     let bundleId: number | undefined;
     try {
       bundleId = statSync(join(distDir, "index.html")).mtimeMs;
@@ -180,7 +166,7 @@ async function fastTick() {
       bundleId,
       summarize: summarizeState(),
       projects,
-      sessions: sessRes.sessions,
+      sessions,
       system: sysRes.info,
     };
     broadcast(snapshot);

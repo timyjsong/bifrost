@@ -9,6 +9,9 @@ function ClaudeProcs({ system }: { system: SystemInfo }) {
       <div className="flex items-baseline justify-between border-b border-line-soft px-4 py-2">
         <span className="text-[11px] uppercase tracking-[0.14em] text-ink-mute">
           claude processes
+          <span className="ml-2 normal-case tracking-normal text-ink-mute/70">
+            cpu = share of box
+          </span>
         </span>
         <span className="font-mono text-[11px] text-ink-mute tabular-nums">
           Σ {fmtKb(system.claudeTotalRssKb)}

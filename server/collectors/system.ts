@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { statfsSync } from "node:fs";
+import { statfsSync, readFileSync } from "node:fs";
 import { hostname, cpus } from "node:os";
 import type { SystemInfo, ProcInfo, TmuxInfo, PortInfo } from "../../shared/types";
+import { cpuPctInstant, type TmuxPane } from "../derive";
 
 async function run(cmd: string[], timeoutMs = 5000): Promise<string | null> {
   try {
@@ -18,6 +19,44 @@ async function run(cmd: string[], timeoutMs = 5000): Promise<string | null> {
 
 const CLAUDE_RE = /(^|\/| )(claude|ccd-cli)(\s|$|\/)/;
 
+// pid -> last cumulative cpu-jiffies sample, for instantaneous CPU
+const procCpu = new Map<number, { jiffies: number; at: number }>();
+
+function readJiffies(pid: number): number | undefined {
+  try {
+    const statLine = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // comm (field 2) may contain spaces — parse after the closing paren.
+    const after = statLine.slice(statLine.lastIndexOf(")") + 2).trimStart().split(" ");
+    return Number(after[11]) + Number(after[12]); // utime + stime
+  } catch {
+    return undefined;
+  }
+}
+
+const CORES = cpus().length;
+
+/** Replace ps's lifetime-average %cpu with a since-last-tick, box-share measurement. */
+function applyInstantCpu(all: ProcInfo[]): void {
+  const now = Date.now();
+  const seen = new Set<number>();
+  for (const p of all) {
+    seen.add(p.pid);
+    const jiffies = readJiffies(p.pid);
+    if (jiffies === undefined) {
+      p.cpu = 0;
+      continue;
+    }
+    const prev = procCpu.get(p.pid);
+    procCpu.set(p.pid, { jiffies, at: now });
+    p.cpu = prev
+      ? cpuPctInstant(jiffies - prev.jiffies, now - prev.at, CORES)
+      : 0;
+  }
+  for (const pid of procCpu.keys()) {
+    if (!seen.has(pid)) procCpu.delete(pid);
+  }
+}
+
 async function collectProcs(): Promise<{
   procs: ProcInfo[];
   claudeTotalRssKb: number;
@@ -25,17 +64,17 @@ async function collectProcs(): Promise<{
   allProcs: ProcInfo[];
 }> {
   const out = await run([
-    "ps", "axo", "pid=,ppid=,user=,rss=,pcpu=,etime=,args=", "--sort=-rss",
+    "ps", "axo", "pid=,ppid=,user=,rss=,pcpu=,etime=,tty=,args=", "--sort=-rss",
   ]);
   if (!out) return { procs: [], claudeTotalRssKb: 0, pidTree: [], allProcs: [] };
 
   const all: ProcInfo[] = [];
   for (const line of out.split("\n")) {
     const m = line.match(
-      /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+([\d.]+)\s+(\S+)\s+(.*)$/,
+      /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\d+)\s+([\d.]+)\s+(\S+)\s+(\S+)\s+(.*)$/,
     );
     if (!m) continue;
-    const command = m[7].trim();
+    const command = m[8].trim();
     all.push({
       pid: Number(m[1]),
       ppid: Number(m[2]),
@@ -43,10 +82,13 @@ async function collectProcs(): Promise<{
       rssKb: Number(m[4]),
       cpu: Number(m[5]),
       etime: m[6],
+      tty: m[7] === "?" ? undefined : m[7],
       command: command.length > 160 ? command.slice(0, 157) + "…" : command,
       isClaude: CLAUDE_RE.test(command),
     });
   }
+
+  applyInstantCpu(all);
 
   const claude = all.filter((p) => p.isClaude);
   const claudeTotalRssKb = claude.reduce((s, p) => s + p.rssKb, 0);
@@ -77,6 +119,23 @@ async function collectTmux(): Promise<TmuxInfo[]> {
     });
   }
   return sessions;
+}
+
+/** Every pane's tty → tmux session, for matching processes into tmux. */
+async function collectTmuxPanes(): Promise<TmuxPane[]> {
+  const out = await run([
+    "tmux", "list-panes", "-a", "-F",
+    "#{pane_tty}\t#{session_name}\t#{session_attached}",
+  ]);
+  if (!out) return [];
+  const panes: TmuxPane[] = [];
+  for (const line of out.split("\n")) {
+    const [tty, session, attached] = line.split("\t");
+    if (!tty || !session) continue;
+    // session_attached counts attached clients
+    panes.push({ tty, session, attached: Number(attached) > 0 });
+  }
+  return panes;
 }
 
 async function collectPorts(): Promise<PortInfo[]> {
@@ -134,10 +193,11 @@ export interface SystemResult {
   info: SystemInfo;
   pidTree: [number, number][]; // [pid, ppid] for every process on the box
   allProcs: ProcInfo[]; // full ps snapshot, for per-session child details
+  tmuxPanes: TmuxPane[]; // pane tty → tmux session, for session residence
 }
 
 export async function collectSystem(): Promise<SystemResult> {
-  const [loadRaw, memRaw, uptimeRaw, statRaw, procsRes, tmux, ports] =
+  const [loadRaw, memRaw, uptimeRaw, statRaw, procsRes, tmux, tmuxPanes, ports] =
     await Promise.all([
       readFile("/proc/loadavg", "utf8"),
       readFile("/proc/meminfo", "utf8"),
@@ -145,6 +205,7 @@ export async function collectSystem(): Promise<SystemResult> {
       readFile("/proc/stat", "utf8"),
       collectProcs(),
       collectTmux(),
+      collectTmuxPanes(),
       collectPorts(),
     ]);
 
@@ -177,5 +238,6 @@ export async function collectSystem(): Promise<SystemResult> {
     },
     pidTree: procsRes.pidTree,
     allProcs: procsRes.allProcs,
+    tmuxPanes,
   };
 }

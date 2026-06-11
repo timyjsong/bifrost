@@ -1,0 +1,12 @@
+{
+  "name": "atrium",
+  "private": true,
+  "scripts": {
+    "check": "bun test && tsc -p tsconfig.json && cd web && tsc -b",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.4",
+    "typescript": "^5.9.0"
+  }
+}

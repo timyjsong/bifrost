@@ -214,6 +214,35 @@ const queued = new Map<string, Pending>();
 const order: string[] = []; // FIFO of queued session ids
 let pumpTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Test seams — production uses the real implementations; tests inject fakes
+// so queue mechanics are exercised without spawning claude or reading /proc.
+let memInfoImpl: () => { totalMb: number; availMb: number };
+let jobRunner: (cfg: AtriumConfig, sessionId: string) => Promise<SummaryResult>;
+let sourceLookup: {
+  path: (id: string) => string | undefined;
+  mtime: (id: string) => number | undefined;
+};
+export function _setTestSeams(seams: {
+  mem?: typeof memInfoImpl;
+  job?: typeof jobRunner;
+  lookup?: typeof sourceLookup;
+}): void {
+  if (seams.mem) memInfoImpl = seams.mem;
+  if (seams.job) jobRunner = seams.job;
+  if (seams.lookup) sourceLookup = seams.lookup;
+}
+
+/** Test-only: clear all queue state so tests are isolated. */
+export function _resetQueueForTest(): void {
+  inFlight.clear();
+  queued.clear();
+  order.length = 0;
+  if (pumpTimer) {
+    clearTimeout(pumpTimer);
+    pumpTimer = null;
+  }
+}
+
 /** Live box memory in MB from /proc/meminfo. Read each dispatch so the limits
  *  track the actual hardware — upsize or downsize the box and they follow,
  *  no config edit needed. */
@@ -227,10 +256,11 @@ function memInfo(): { totalMb: number; availMb: number } {
     return { totalMb: 0, availMb: Number.MAX_SAFE_INTEGER };
   }
 }
+memInfoImpl = memInfo;
 
 /** Concurrency derived from live total RAM: how many ~perJobMb jobs fit in the
  *  share of memory summaries are allowed, clamped to [2, cap]. Scales with the box. */
-function deriveMaxInFlight(cfg: AtriumConfig, totalMb: number): number {
+export function deriveMaxInFlight(cfg: AtriumConfig, totalMb: number): number {
   if (!totalMb) return 2;
   const derived = Math.floor(
     (totalMb * cfg.summarize.ramShare) / cfg.summarize.perJobMb,
@@ -263,7 +293,7 @@ function pump(cfg: AtriumConfig) {
     pumpTimer = null;
   }
   while (order.length > 0) {
-    const { totalMb, availMb } = memInfo();
+    const { totalMb, availMb } = memInfoImpl();
     if (inFlight.size >= deriveMaxInFlight(cfg, totalMb)) break;
     // Hold the whole queue when free RAM dips below the reserve; retry shortly.
     if (availMb < totalMb * cfg.summarize.memReservePct) {
@@ -273,14 +303,14 @@ function pump(cfg: AtriumConfig) {
     const sessionId = order.shift()!;
     const pending = queued.get(sessionId)!;
     queued.delete(sessionId);
-    const task = produceSummary(cfg, sessionId)
-      .then((r) => pending.resolve(r))
-      .catch((e) => pending.reject(e))
-      .finally(() => {
-        inFlight.delete(sessionId);
-        pump(cfg);
-      });
-    inFlight.set(sessionId, task as Promise<SummaryResult>);
+    // Store the RAW job promise so late joiners get the actual result;
+    // settlement and slot-recycling ride a separate chain.
+    const task = jobRunner(cfg, sessionId);
+    inFlight.set(sessionId, task);
+    task.then(pending.resolve, pending.reject).finally(() => {
+      inFlight.delete(sessionId);
+      pump(cfg);
+    });
   }
 }
 
@@ -289,8 +319,8 @@ async function produceSummary(
   cfg: AtriumConfig,
   sessionId: string,
 ): Promise<SummaryResult> {
-  const sourcePath = transcriptPathFor(sessionId);
-  const sourceMtime = transcriptMtimeFor(sessionId);
+  const sourcePath = sourceLookup.path(sessionId);
+  const sourceMtime = sourceLookup.mtime(sessionId);
   if (!sourcePath || sourceMtime === undefined) {
     throw new Error("unknown session");
   }
@@ -298,6 +328,8 @@ async function produceSummary(
   if (cached) return cached;
   return runSummarize(cfg, sessionId, sourcePath, sourceMtime);
 }
+jobRunner = produceSummary;
+sourceLookup = { path: transcriptPathFor, mtime: transcriptMtimeFor };
 
 /** Valid cached summary for the current source mtime, or null. */
 function readCache(
@@ -326,8 +358,8 @@ export async function summarizeSession(
   cfg: AtriumConfig,
   sessionId: string,
 ): Promise<SummaryResult> {
-  const sourceMtime = transcriptMtimeFor(sessionId);
-  if (!transcriptPathFor(sessionId) || sourceMtime === undefined) {
+  const sourceMtime = sourceLookup.mtime(sessionId);
+  if (!sourceLookup.path(sessionId) || sourceMtime === undefined) {
     throw new Error("unknown session");
   }
 
