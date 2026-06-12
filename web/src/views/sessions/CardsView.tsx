@@ -265,7 +265,13 @@ function HeadlessGroup({ list, now }: { list: SessionInfo[]; now: number }) {
   );
 }
 
-export function CardsView({ groups, now, summarize, isWide }: SessionsViewProps) {
+export function CardsView({
+  groups,
+  now,
+  summarize,
+  isWide,
+  filtersActive,
+}: SessionsViewProps) {
   const { needsYou, working, liveHeadless } = groups;
   const cols = isWide ? 2 : 1;
 
@@ -314,7 +320,9 @@ export function CardsView({ groups, now, summarize, isWide }: SessionsViewProps)
 
       {needsYou.length === 0 && working.length === 0 && (
         <Panel className="px-4 py-6 text-center text-[13px] text-ink-mute">
-          no interactive sessions running
+          {filtersActive
+            ? "no sessions match the filters"
+            : "no interactive sessions running"}
         </Panel>
       )}
 

@@ -100,7 +100,12 @@ function Row({
  * and pinned on top. Same data as cards, different shape — proof the view
  * layer swaps freely.
  */
-export function TableView({ groups, now, summarize }: SessionsViewProps) {
+export function TableView({
+  groups,
+  now,
+  summarize,
+  filtersActive,
+}: SessionsViewProps) {
   const { needsYou, working, liveHeadless } = groups;
   const ordered = [...needsYou, ...working];
   return (
@@ -110,7 +115,9 @@ export function TableView({ groups, now, summarize }: SessionsViewProps) {
       ))}
       {ordered.length === 0 && (
         <div className="px-4 py-6 text-center text-[13px] text-ink-mute">
-          no interactive sessions running
+          {filtersActive
+            ? "no sessions match the filters"
+            : "no interactive sessions running"}
         </div>
       )}
       {liveHeadless.length > 0 && (

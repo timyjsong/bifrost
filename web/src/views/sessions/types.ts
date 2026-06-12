@@ -12,6 +12,7 @@ export interface SessionsViewProps {
   now: number;
   summarize: Snapshot["summarize"];
   isWide: boolean;
+  filtersActive: boolean; // some sessions may be hidden by the filter bar
 }
 
 export interface SessionsViewDef {

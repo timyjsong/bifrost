@@ -1,10 +1,22 @@
 import { useEffect, useState } from "react";
 import type { SessionInfo, Snapshot } from "../../../shared/types";
 import { groupSessions } from "../lib/selectors";
+import { applyFilters, NO_FILTERS, type SessionFilters } from "../lib/sessionFilters";
 import { SectionTitle } from "./ui";
+import { SessionFilterBar } from "./SessionFilterBar";
 import { SESSIONS_VIEWS, DEFAULT_VIEW } from "../views/sessions";
 
 const VIEW_KEY = "atrium.sessions.view";
+const FILTER_KEY = "atrium.sessions.filters";
+
+function loadFilters(): SessionFilters {
+  try {
+    const raw = localStorage.getItem(FILTER_KEY);
+    return raw ? { ...NO_FILTERS, ...JSON.parse(raw) } : NO_FILTERS;
+  } catch {
+    return NO_FILTERS;
+  }
+}
 
 /** Track the xl breakpoint so views can pack into independent columns. */
 function useIsWide(): boolean {
@@ -37,17 +49,26 @@ export function SessionsPane({
   const [viewId, setViewId] = useState(
     () => localStorage.getItem(VIEW_KEY) ?? DEFAULT_VIEW,
   );
+  const [filters, setFilters] = useState<SessionFilters>(loadFilters);
   const view =
     SESSIONS_VIEWS.find((v) => v.id === viewId) ?? SESSIONS_VIEWS[0];
-  const groups = groupSessions(sessions);
+  // Only live sessions reach the views; filter that population, then group.
+  const live = sessions.filter((s) => s.live);
+  const filtered = applyFilters(live, filters, now);
+  const groups = groupSessions(filtered);
   const liveCount =
     groups.needsYou.length + groups.working.length + groups.liveHeadless.length;
+
+  const updateFilters = (f: SessionFilters) => {
+    setFilters(f);
+    localStorage.setItem(FILTER_KEY, JSON.stringify(f));
+  };
 
   return (
     <section id="sessions" className="scroll-mt-8">
       <SectionTitle
         title="Sessions"
-        hint={`${liveCount} live`}
+        hint={`${live.length} live`}
         right={
           <div className="flex gap-1.5">
             {SESSIONS_VIEWS.map((v) => (
@@ -69,11 +90,18 @@ export function SessionsPane({
           </div>
         }
       />
+      <SessionFilterBar
+        filters={filters}
+        onChange={updateFilters}
+        shown={liveCount}
+        total={live.length}
+      />
       <view.Component
         groups={groups}
         now={now}
         summarize={summarize}
         isWide={isWide}
+        filtersActive={filtered.length < live.length}
       />
     </section>
   );
