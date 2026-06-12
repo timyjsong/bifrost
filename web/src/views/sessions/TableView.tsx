@@ -6,8 +6,6 @@ import { Bar, Dot, Panel } from "../../components/ui";
 import { SummaryBlock } from "../../components/SummaryBlock";
 import type { SessionsViewProps } from "./types";
 
-const CONTEXT_MAX = 1_000_000;
-
 function stateLabel(s: SessionInfo, now: number): { text: string; cls: string } {
   switch (s.state) {
     case "awaiting":
@@ -62,8 +60,12 @@ function Row({
         <span className="hidden w-24 shrink-0 lg:block">
           {s.contextTokens !== undefined && (
             <Bar
-              ratio={s.contextTokens / CONTEXT_MAX}
-              tone={s.contextTokens / CONTEXT_MAX > 0.75 ? "danger" : "gold"}
+              ratio={s.contextTokens / (s.contextWindow ?? 200_000)}
+              tone={
+                s.contextTokens / (s.contextWindow ?? 200_000) > 0.75
+                  ? "danger"
+                  : "gold"
+              }
             />
           )}
         </span>

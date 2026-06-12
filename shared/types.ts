@@ -14,6 +14,8 @@ export interface SessionInfo {
   startedAt?: number; // epoch ms
   lastActivityAt: number; // epoch ms
   contextTokens?: number;
+  contextWindow?: number; // resolved window size (live sessions; switch-aware)
+  contextWindowSrc?: "model-log" | "launch-flag" | "last-model-usage" | "lookup";
   transcriptBytes?: number;
   // live-session activity state (derived; live interactive sessions only)
   state?: "awaiting" | "approval" | "paused" | "working";

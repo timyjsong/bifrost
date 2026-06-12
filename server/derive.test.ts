@@ -9,6 +9,10 @@ import {
   canonCommand,
   cpuPctInstant,
   isPrintCmdline,
+  launchModelFromCmdline,
+  resolveContextMeter,
+  windowForModel,
+  windowFromModelLog,
 } from "./derive";
 import type { SessionInfo, ProcInfo } from "../shared/types";
 import type { SessionSignals } from "./collectors/sessions";
@@ -112,6 +116,124 @@ describe("isPrintCmdline", () => {
       ),
     ).toBe(false);
     expect(isPrintCmdline(undefined)).toBe(false);
+  });
+});
+
+describe("launchModelFromCmdline", () => {
+  test("extracts the --model flag with its [1m] variant", () => {
+    expect(launchModelFromCmdline("claude --model fable[1m]")).toBe("fable[1m]");
+    expect(
+      launchModelFromCmdline(
+        "/home/you/.claude/remote/ccd-cli/2.1.170 --output-format stream-json --model claude-opus-4-8[1m] --resume abc",
+      ),
+    ).toBe("claude-opus-4-8[1m]");
+    expect(launchModelFromCmdline("claude --model=opus")).toBe("opus");
+  });
+  test("bare launches yield nothing", () => {
+    expect(launchModelFromCmdline("claude")).toBeUndefined();
+    expect(launchModelFromCmdline(undefined)).toBeUndefined();
+  });
+});
+
+describe("windowForModel", () => {
+  test("[1m] suffix and (1M context) marker mean 1M", () => {
+    expect(windowForModel("claude-opus-4-8[1m]")).toBe(1_000_000);
+    expect(windowForModel("Opus 4.8 (1M context)")).toBe(1_000_000);
+  });
+  test("Fable is 1M unconditionally (verified via /context)", () => {
+    expect(windowForModel("Fable 5")).toBe(1_000_000);
+    expect(windowForModel("claude-fable-5")).toBe(1_000_000);
+  });
+  test("Opus base / Sonnet / Haiku are 200K", () => {
+    expect(windowForModel("claude-opus-4-8")).toBe(200_000);
+    expect(windowForModel("Sonnet 4.6")).toBe(200_000);
+    expect(windowForModel("Haiku 4.5")).toBe(200_000);
+  });
+});
+
+describe("windowFromModelLog", () => {
+  test("ANSI-styled display format: bold code is literally \\x1b[1m", () => {
+    // observed live 2026-06-11: styling stripped before name mapping
+    expect(
+      windowFromModelLog(
+        "Set model to \x1b[1mOpus 4.8 (1M context)\x1b[22m and saved as your default",
+      ),
+    ).toBe(1_000_000);
+    // Fable's stdout omits any context marker, yet it is 1M
+    expect(
+      windowFromModelLog(
+        "Set model to \x1b[1mFable 5\x1b[22m and saved as your default",
+      ),
+    ).toBe(1_000_000);
+    expect(
+      windowFromModelLog(
+        "Set model to \x1b[1mHaiku 4.5\x1b[22m and saved as your default",
+      ),
+    ).toBe(200_000);
+  });
+  test("non-matching text yields nothing", () => {
+    expect(windowFromModelLog("some other stdout")).toBeUndefined();
+  });
+});
+
+describe("resolveContextMeter", () => {
+  test("tier 1: /model switch log wins; usage entries name the model", () => {
+    expect(
+      resolveContextMeter({
+        setWindow: 1_000_000,
+        launchModel: "fable[1m]",
+        msgModel: "claude-opus-4-8",
+      }),
+    ).toEqual({
+      window: 1_000_000,
+      windowSrc: "model-log",
+      model: "claude-opus-4-8[1m]",
+    });
+    // variant-only downswitch: opus[1m] -> opus
+    expect(
+      resolveContextMeter({ setWindow: 200_000, msgModel: "claude-opus-4-8" }),
+    ).toMatchObject({ window: 200_000, model: "claude-opus-4-8" });
+  });
+  test("tier 2: launch flag decides the window; transcript names the model", () => {
+    const m = resolveContextMeter({
+      launchModel: "fable[1m]",
+      msgModel: "claude-fable-5",
+    });
+    expect(m.window).toBe(1_000_000);
+    expect(m.windowSrc).toBe("launch-flag");
+    expect(m.model).toBe("claude-fable-5[1m]");
+    expect(
+      resolveContextMeter({ launchModel: "opus", msgModel: "claude-opus-4-8" })
+        .window,
+    ).toBe(200_000);
+  });
+  test("tier 3: lastModelUsage only when unambiguous", () => {
+    const base = { msgModel: "claude-opus-4-8" };
+    expect(
+      resolveContextMeter({
+        ...base,
+        projectModels: ["claude-opus-4-8[1m]"],
+      }),
+    ).toMatchObject({ window: 1_000_000, windowSrc: "last-model-usage" });
+    expect(
+      resolveContextMeter({
+        ...base,
+        projectModels: ["claude-opus-4-8"],
+      }),
+    ).toMatchObject({ window: 200_000, windowSrc: "last-model-usage" });
+    // both variants used in the project: ambiguous, fall to labeled lookup
+    expect(
+      resolveContextMeter({
+        ...base,
+        projectModels: ["claude-opus-4-8", "claude-opus-4-8[1m]"],
+      }),
+    ).toMatchObject({ window: 200_000, windowSrc: "lookup" });
+  });
+  test("tier 4: nothing known = 200K labeled lookup", () => {
+    expect(resolveContextMeter({})).toMatchObject({
+      window: 200_000,
+      windowSrc: "lookup",
+    });
   });
 });
 

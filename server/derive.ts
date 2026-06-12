@@ -126,6 +126,100 @@ export function isPrintCmdline(args: string | undefined): boolean {
   return args.split(/\s+/).some((t) => t === "-p" || t === "--print");
 }
 
+/** The --model flag from a live cmdline — carries the [1m] variant that
+ *  per-message `message.model` drops. */
+export function launchModelFromCmdline(args: string | undefined): string | undefined {
+  return args?.match(/--model[= ](\S+)/)?.[1];
+}
+
+// Empirical window sizing (ported from tools/context-meter.py, kept in sync):
+// the [1m] suffix means 1M; every base id means 200K — the only distinction
+// that exists in practice for current Claude models.
+const WIN_1M = 1_000_000;
+const WIN_BASE = 200_000;
+
+export interface ContextMeter {
+  window: number;
+  /** measured sources: model-log, launch-flag, last-model-usage; lookup = default, not measured */
+  windowSrc: "model-log" | "launch-flag" | "last-model-usage" | "lookup";
+  model?: string; // best current model id, variant-aware where known
+}
+
+/**
+ * The context window for a model id or display name. Empirically pinned
+ * 2026-06-11 (via /context on live switches + ~/.claude.json lastModelUsage):
+ *   - the [1m] suffix or a "(1M context)" marker  => 1M
+ *   - Fable 5 is 1M unconditionally (its only window; the picker doesn't even
+ *     annotate it — a picker-selected bare "Fable 5" measured 967k free ≈ 1M)
+ *   - Opus base / Sonnet / Haiku => 200K (no [1m] variant exists for the
+ *     latter two in lastModelUsage)
+ * Unknown future models fall to the safe 200K default.
+ */
+export function windowForModel(idOrName: string): number {
+  const is1m = idOrName.includes("[1m]") || /\(1M context\)/i.test(idOrName);
+  return is1m || /\bfable\b/i.test(idOrName) ? WIN_1M : WIN_BASE;
+}
+
+/**
+ * Window from a "/model" command's stdout line, e.g.
+ *   "Set model to \x1b[1mOpus 4.8 (1M context)\x1b[22m and saved …"   (picker)
+ *   "Set model to \x1b[1mFable 5\x1b[22m and saved …"                 (picker/typed)
+ * The ANSI bold code is literally "\x1b[1m" — strip escapes first, or the
+ * styling reads as a [1m] variant marker on the wrong models. The display
+ * name carries the model identity; windowForModel maps it to a size.
+ */
+export function windowFromModelLog(text: string): number | undefined {
+  const clean = text.replace(/\x1b\[[0-9;]*m/g, "");
+  const m = clean.match(/Set model to ([^<\n]+)/);
+  return m ? windowForModel(m[1]) : undefined;
+}
+
+/**
+ * Resolve a live session's context window, switch-aware. Tiers, first wins:
+ *  1. last /model switch logged in the transcript (exact, has variant)
+ *  2. the --model launch flag from the live cmdline (exact at launch; any
+ *     later switch produces a tier-1 line, so this can't go stale)
+ *  3. ~/.claude.json lastModelUsage for the project — only when unambiguous
+ *  4. base default 200K, labeled as a lookup
+ */
+export function resolveContextMeter(opts: {
+  setWindow?: number; // from the last "/model" stdout line, last wins
+  launchModel?: string; // from /proc cmdline --model
+  msgModel?: string; // from the transcript tail's usage entries (base id)
+  projectModels?: string[]; // lastModelUsage keys for the session's cwd
+}): ContextMeter {
+  const { setWindow, launchModel, msgModel, projectModels } = opts;
+  const model = msgModel ?? launchModel;
+  if (setWindow) {
+    // the log decides the window; the transcript's usage entries name the
+    // model (the display-format log line doesn't carry a usable id)
+    const display =
+      msgModel && setWindow === WIN_1M && !msgModel.endsWith("[1m]")
+        ? `${msgModel}[1m]`
+        : model;
+    return { window: setWindow, windowSrc: "model-log", model: display };
+  }
+  if (launchModel) {
+    // prefer the launch flag's variant-awareness, but a full id from the
+    // transcript names the model better than a launch alias like "fable[1m]"
+    const display =
+      msgModel && launchModel.endsWith("[1m]") ? `${msgModel}[1m]` : (msgModel ?? launchModel);
+    return { window: windowForModel(launchModel), windowSrc: "launch-flag", model: display };
+  }
+  const base = (msgModel ?? "").replace("[1m]", "");
+  if (base && projectModels) {
+    const has1m = projectModels.includes(`${base}[1m]`);
+    const hasBase = projectModels.includes(base);
+    if (has1m && !hasBase) {
+      return { window: WIN_1M, windowSrc: "last-model-usage", model: `${base}[1m]` };
+    }
+    if (hasBase && !has1m) {
+      return { window: windowForModel(base), windowSrc: "last-model-usage", model };
+    }
+  }
+  return { window: WIN_BASE, windowSrc: "lookup", model };
+}
+
 export interface TmuxPane {
   tty: string; // "/dev/pts/2"
   session: string;

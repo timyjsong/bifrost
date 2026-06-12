@@ -152,6 +152,39 @@ describe("parseTail", () => {
     ]);
     expect(tail.openTools).toBe(1);
   });
+  test("model switches: only real command stdout counts, last wins", () => {
+    const tail = parseTail(
+      [
+        userLine(
+          "<local-command-stdout>Set model to claude-opus-4-8</local-command-stdout>",
+        ),
+        // an assistant quoting the line must NOT count
+        assistantLine(
+          [{ type: "text", text: "I saw `Set model to claude-haiku-4-5[1m]` earlier" }],
+          "end_turn",
+        ),
+        // nor a tool_result that echoes a stdout block (grep of a transcript)
+        line({
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "t9",
+                content:
+                  "<local-command-stdout>Set model to claude-sonnet-4-6</local-command-stdout>",
+              },
+            ],
+          },
+        }),
+        userLine(
+          "<local-command-stdout>Set model to \x1b[1mOpus 4.8 (1M context)\x1b[22m and saved as your default</local-command-stdout>",
+        ),
+      ].join("\n"),
+    );
+    expect(tail.setWindow).toBe(1_000_000);
+  });
   test("custom-title entries: last in window wins", () => {
     const tail = parseTail(
       [

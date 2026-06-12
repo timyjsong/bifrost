@@ -7,8 +7,6 @@ import { Bar, Chip, Dot, Panel } from "../../components/ui";
 import { SummaryBlock } from "../../components/SummaryBlock";
 import type { SessionsViewProps } from "./types";
 
-const CONTEXT_MAX = 1_000_000;
-
 /**
  * Where the session runs — one chip, most specific wins. tmux/ssh imply a
  * terminal, so the bare entrypoint label only shows when neither applies.
@@ -59,11 +57,17 @@ function ModelBadge({ model }: { model: string }) {
   );
 }
 
-function ContextGauge({ tokens }: { tokens?: number }) {
-  if (tokens === undefined) {
+function fmtWindow(window: number): string {
+  return window >= 1_000_000 ? `${window / 1_000_000}M` : `${window / 1_000}K`;
+}
+
+function ContextGauge({ s }: { s: SessionInfo }) {
+  if (s.contextTokens === undefined) {
     return <div className="text-[11px] text-ink-mute">context —</div>;
   }
-  const ratio = tokens / CONTEXT_MAX;
+  const window = s.contextWindow ?? 200_000;
+  const measured = s.contextWindowSrc !== undefined && s.contextWindowSrc !== "lookup";
+  const ratio = s.contextTokens / window;
   return (
     <div className="flex items-center gap-2">
       <Bar
@@ -72,7 +76,8 @@ function ContextGauge({ tokens }: { tokens?: number }) {
         className="w-24"
       />
       <span className="font-mono text-[11px] text-ink-mute tabular-nums">
-        {fmtTokens(tokens)} / 1M
+        {fmtTokens(s.contextTokens)} / {measured ? "" : "~"}
+        {fmtWindow(window)}
       </span>
     </div>
   );
@@ -193,7 +198,7 @@ function LiveCard({
         </div>
         <ChildList children={s.children ?? []} />
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-          <ContextGauge tokens={s.contextTokens} />
+          <ContextGauge s={s} />
           <span className="text-[11px] text-ink-mute">
             up {relTime(s.startedAt, now)} · active {relTime(s.lastActivityAt, now)}
           </span>

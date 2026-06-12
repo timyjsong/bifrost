@@ -1,8 +1,15 @@
 import { readFileSync } from "node:fs";
-import { readdir, stat, open } from "node:fs/promises";
+import { readdir, stat, open, readFile } from "node:fs/promises";
 import { join, basename, dirname } from "node:path";
 import type { SessionInfo } from "../../shared/types";
-import { canonCommand, isPrintCmdline, type ToolCall } from "../derive";
+import {
+  canonCommand,
+  isPrintCmdline,
+  launchModelFromCmdline,
+  resolveContextMeter,
+  windowFromModelLog,
+  type ToolCall,
+} from "../derive";
 import { fullArgsForPid } from "../tasknames";
 import type { AtriumConfig } from "../config";
 
@@ -55,6 +62,7 @@ interface TranscriptTail {
   openTools: number;
   calls?: ToolCall[]; // every described tool call in the window, open or done
   customTitle?: string; // last user-set session name seen in the window
+  setWindow?: number; // window from the last "/model" switch seen in the window
   nowDoing?: string;
   lastPromptAt?: number;
 }
@@ -95,6 +103,91 @@ const SIDECHAIN_TAIL_BYTES = 64 * 1024;
 const callIndexBySession = new Map<string, Map<string, string>>();
 const titleBySession = new Map<string, string>();
 const sidechainSeen = new Map<string, number>(); // agent file path -> parsed mtime
+// sessionId -> window from the last "/model" switch (sticky — survives the tail window).
+const modelLogBySession = new Map<string, number>();
+const fullScanned = new Set<string>();
+
+/**
+ * One-time whole-transcript pass per live session: the last /model switch
+ * (and a custom title) can sit mid-file, outside both head and tail windows
+ * — e.g. after a collector restart. Later switches land in the tail and
+ * overwrite. Mirrors tools/context-meter.py tier 1.
+ */
+async function fullScanOnce(sessionId: string, path: string): Promise<void> {
+  if (fullScanned.has(sessionId)) return;
+  fullScanned.add(sessionId);
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return;
+  }
+  let setWindow: number | undefined;
+  let title: string | undefined;
+  for (const line of raw.split("\n")) {
+    if (line.includes("local-command-stdout") && line.includes("Set model to")) {
+      try {
+        const d = JSON.parse(line);
+        const content = d?.message?.content;
+        if (d?.type !== "user" || d?.message?.role !== "user") continue;
+        // tool_results can quote stdout blocks — only plain user entries count
+        if (
+          Array.isArray(content) &&
+          content.some((c: any) => c?.type === "tool_result")
+        ) {
+          continue;
+        }
+        const text = typeof content === "string" ? content : extractText(content);
+        if (text?.includes("local-command-stdout")) {
+          setWindow = windowFromModelLog(text) ?? setWindow;
+        }
+      } catch {
+        // partial line
+      }
+    } else if (line.includes('"custom-title"')) {
+      try {
+        const d = JSON.parse(line);
+        if (d?.type === "custom-title" && typeof d.customTitle === "string") {
+          title = d.customTitle;
+        }
+      } catch {
+        // partial line
+      }
+    }
+  }
+  if (setWindow && !modelLogBySession.has(sessionId)) {
+    modelLogBySession.set(sessionId, setWindow);
+  }
+  if (title && !titleBySession.has(sessionId)) {
+    titleBySession.set(sessionId, title);
+  }
+}
+
+// ~/.claude.json (sits next to claudeDir): projects[cwd].lastModelUsage keys,
+// mtime-cached — tier 3 of the window resolution.
+let claudeJsonCache: { mtimeMs: number; projects: Record<string, string[]> } | null =
+  null;
+
+async function projectModelsFor(
+  claudeDir: string,
+  cwd: string,
+): Promise<string[] | undefined> {
+  const path = claudeDir.replace(/\/$/, "") + ".json";
+  try {
+    const st = await stat(path);
+    if (!claudeJsonCache || claudeJsonCache.mtimeMs !== st.mtimeMs) {
+      const d = JSON.parse(await readFile(path, "utf8"));
+      const projects: Record<string, string[]> = {};
+      for (const [k, v] of Object.entries(d.projects ?? {})) {
+        projects[k] = Object.keys((v as any)?.lastModelUsage ?? {});
+      }
+      claudeJsonCache = { mtimeMs: st.mtimeMs, projects };
+    }
+    return claudeJsonCache.projects[cwd];
+  } catch {
+    return undefined;
+  }
+}
 
 function mergeCalls(sessionId: string, calls: ToolCall[] | undefined): void {
   if (!calls?.length) return;
@@ -318,6 +411,13 @@ export function parseTail(chunk: string): TranscriptTail {
       } else {
         tail.lastEntry = "user_prompt";
         if (d.timestamp) tail.lastPromptAt = Date.parse(d.timestamp);
+        // "/model" switches announce themselves in command stdout. Only trust
+        // plain user entries carrying the stdout marker — tool_results and
+        // assistant prose can QUOTE these lines (seen live 2026-06-11).
+        const text = typeof content === "string" ? content : extractText(content);
+        if (text?.includes("local-command-stdout")) {
+          tail.setWindow = windowFromModelLog(text) ?? tail.setWindow;
+        }
       }
     }
   }
@@ -402,13 +502,16 @@ async function fullSweep(claudeDir: string): Promise<void> {
   }
 }
 
+interface LiveExtras {
+  cpuQuietMs: number;
+  printMode: boolean;
+  launchModel?: string;
+}
+
 async function collectLive(
   claudeDir: string,
-): Promise<Map<string, LivePidFile & { cpuQuietMs: number; printMode: boolean }>> {
-  const live = new Map<
-    string,
-    LivePidFile & { cpuQuietMs: number; printMode: boolean }
-  >();
+): Promise<Map<string, LivePidFile & LiveExtras>> {
+  const live = new Map<string, LivePidFile & LiveExtras>();
   let files: string[] = [];
   try {
     files = await readdir(join(claudeDir, "sessions"));
@@ -425,12 +528,14 @@ async function collectLive(
       if (!d.pid || !d.sessionId) continue;
       const proc = readProc(d.pid, d.procStart);
       if (!proc.alive) continue;
+      const args = fullArgsForPid(d.pid);
       live.set(d.sessionId, {
         ...d,
         cpuQuietMs: trackCpu(d.pid, proc.jiffies, now),
         // pid files of desktop-spawned background agents claim
         // kind=interactive — the cmdline is the honest signal
-        printMode: isPrintCmdline(fullArgsForPid(d.pid)),
+        printMode: isPrintCmdline(args),
+        launchModel: launchModelFromCmdline(args),
       });
     } catch {
       // unreadable/partial pid file — treat as not live
@@ -503,7 +608,16 @@ export async function collectSessions(
     seen.add(sessionId);
     const seenTitle = entry.tail.customTitle ?? entry.head?.customTitle;
     if (seenTitle) titleBySession.set(sessionId, seenTitle);
+    let meter;
     if (lp) {
+      await fullScanOnce(sessionId, fs.path);
+      if (entry.tail.setWindow) modelLogBySession.set(sessionId, entry.tail.setWindow);
+      meter = resolveContextMeter({
+        setWindow: modelLogBySession.get(sessionId),
+        launchModel: lp.launchModel,
+        msgModel: entry.tail.model,
+        projectModels: await projectModelsFor(cfg.claudeDir, cwd),
+      });
       mergeCalls(sessionId, entry.tail.calls);
       await scanSidechains(sessionId, fs.path);
       signals.set(sessionId, {
@@ -531,7 +645,9 @@ export async function collectSessions(
       title: entry.head.title,
       customTitle: titleBySession.get(sessionId),
       gitBranch: entry.head.gitBranch,
-      model: entry.tail.model,
+      model: meter?.model ?? entry.tail.model,
+      contextWindow: meter?.window,
+      contextWindowSrc: meter?.windowSrc,
       startedAt: lp?.startedAt ?? entry.head.startedAt,
       lastActivityAt: entry.tail.lastTimestamp ?? fs.mtimeMs,
       contextTokens: entry.tail.contextTokens,
@@ -589,6 +705,12 @@ export async function collectSessions(
   // for any transcript still indexed.
   for (const sid of callIndexBySession.keys()) {
     if (!live.has(sid)) callIndexBySession.delete(sid);
+  }
+  for (const sid of fullScanned) {
+    if (!live.has(sid)) {
+      fullScanned.delete(sid);
+      modelLogBySession.delete(sid);
+    }
   }
   for (const sid of titleBySession.keys()) {
     if (!fileIndex.has(sid)) titleBySession.delete(sid);
