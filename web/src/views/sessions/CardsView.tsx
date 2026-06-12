@@ -3,33 +3,45 @@ import { motion, AnimatePresence } from "motion/react";
 import type { SessionInfo, ChildProc } from "../../../../shared/types";
 import { basename, fmtKb, fmtTokens, relTime, tildify } from "../../lib/format";
 import { splitColumns, queueStatusOf, type QueueStatus } from "../../lib/selectors";
-import { Bar, Chip, Dot, Panel } from "../../components/ui";
+import { residenceOf } from "../../lib/sessionFilters";
+import {
+  groupChildren,
+  gaugeModel,
+  fmtWindow,
+  stateStripe,
+  glyphForModel,
+  type StripeTone,
+} from "../../lib/cardModel";
+import { Chip, Dot, Panel } from "../../components/ui";
 import { SummaryBlock } from "../../components/SummaryBlock";
 import type { SessionsViewProps } from "./types";
 
 /**
- * Where the session runs — one chip, most specific wins. tmux/ssh imply a
- * terminal, so the bare entrypoint label only shows when neither applies.
+ * Where the session runs — one chip, classified by the same residenceOf the
+ * filter bar uses, so chip and filter can never disagree.
  */
 function ResidenceChip({ s }: { s: SessionInfo }) {
-  if (s.tmuxSession) {
-    return (
-      <Chip tone="tmux" mono>
-        tmux {s.tmuxSession}
-        {s.tmuxAttached ? "" : " · detached"}
-      </Chip>
-    );
+  switch (residenceOf(s)) {
+    case "tmux":
+      return (
+        <Chip tone="tmux" mono>
+          tmux {s.tmuxSession}
+          {s.tmuxAttached ? "" : " · detached"}
+        </Chip>
+      );
+    case "ssh":
+      return (
+        <Chip tone="ssh" mono>
+          ssh
+        </Chip>
+      );
+    case "desktop":
+      return <Chip tone="desk">desktop</Chip>;
+    case "terminal":
+      return <Chip tone="mute">terminal</Chip>;
+    default:
+      return <Chip tone="mute">{s.entrypoint ?? "?"}</Chip>;
   }
-  if (s.overSsh) {
-    return (
-      <Chip tone="ssh" mono>
-        ssh
-      </Chip>
-    );
-  }
-  if (s.entrypoint === "claude-desktop") return <Chip tone="desk">desktop</Chip>;
-  if (s.entrypoint === "cli") return <Chip tone="mute">terminal</Chip>;
-  return <Chip tone="mute">{s.entrypoint ?? "?"}</Chip>;
 }
 
 function shortModel(model?: string): string | undefined {
@@ -38,46 +50,39 @@ function shortModel(model?: string): string | undefined {
 
 // model pill: round + glyph + docked right — its own family, distinct from
 // the square residence chips even where hues come close
-const MODEL_GLYPHS: [RegExp, string, string][] = [
-  [/fable/, "◆", "text-gold"],
-  [/opus/, "●", "text-opus"],
-  [/sonnet/, "▲", "text-sonnet"],
-  [/haiku/, "○", "text-haiku"],
-];
-
 function ModelBadge({ model }: { model: string }) {
-  const fam = MODEL_GLYPHS.find(([re]) => re.test(model));
+  const fam = glyphForModel(model);
   return (
     <span className="inline-flex items-center gap-1.5 rounded-full border border-line bg-panel-raised px-2 py-px font-mono text-[11px] leading-4 text-ink-dim">
-      <span className={`text-[9px] ${fam ? fam[2] : "text-ink-mute"}`}>
-        {fam ? fam[1] : "·"}
-      </span>
+      <span className={`text-[9px] ${fam.cls}`}>{fam.glyph}</span>
       {shortModel(model)}
     </span>
   );
 }
 
-function fmtWindow(window: number): string {
-  return window >= 1_000_000 ? `${window / 1_000_000}M` : `${window / 1_000}K`;
-}
-
 function ContextGauge({ s }: { s: SessionInfo }) {
-  if (s.contextTokens === undefined) {
-    return <div className="text-[11px] text-ink-mute">context —</div>;
+  const g = gaugeModel(s);
+  if (!g) {
+    return <div className="text-[11px] text-ink-mute">ctx —</div>;
   }
-  const window = s.contextWindow ?? 200_000;
-  const measured = s.contextWindowSrc !== undefined && s.contextWindowSrc !== "lookup";
-  const ratio = s.contextTokens / window;
   return (
     <div className="flex items-center gap-2">
-      <Bar
-        ratio={ratio}
-        tone={ratio > 0.75 ? "danger" : "gold"}
-        className="w-24"
-      />
+      <span className="text-[9.5px] uppercase tracking-[0.14em] text-ink-mute/70">
+        ctx
+      </span>
+      <div className="relative h-[4px] w-28 overflow-hidden rounded-full bg-line-soft">
+        <div
+          className={`h-full rounded-full transition-[width] duration-700 ease-out ${
+            g.danger ? "bg-danger/90" : "bg-gold/80"
+          }`}
+          style={{ width: `${g.ratio * 100}%` }}
+        />
+        {/* the 75% line — where a session starts needing a /clear plan */}
+        <span className="absolute inset-y-0 left-3/4 w-px bg-bg" />
+      </div>
       <span className="font-mono text-[11px] text-ink-mute tabular-nums">
-        {fmtTokens(s.contextTokens)} / {measured ? "" : "~"}
-        {fmtWindow(window)}
+        {fmtTokens(s.contextTokens)} / {g.measured ? "" : "~"}
+        {fmtWindow(g.window)}
       </span>
     </div>
   );
@@ -118,28 +123,33 @@ function StateBadge({ s, now }: { s: SessionInfo; now: number }) {
 function ChildList({ children }: { children: ChildProc[] }) {
   if (children.length === 0) {
     return (
-      <div className="flex items-baseline gap-2 font-mono text-[11px] text-ink-mute/70">
-        <span>·</span>no subprocesses running
+      <div className="border-l border-line-soft pl-3 font-mono text-[11px] text-ink-mute/60">
+        no subprocesses running
       </div>
     );
   }
   return (
-    <ul className="space-y-1">
-      {children.map((c) => (
+    <ul className="space-y-1.5 border-l border-line-soft pl-3">
+      {groupChildren(children).map(({ c, n, rssKb, cpu }) => (
         <li
           key={c.pid}
           className="flex items-baseline gap-2 font-mono text-[11px] text-ink-mute"
         >
-          <span className="text-gold-dim">·</span>
           <span
-            className={`min-w-0 flex-1 truncate ${c.name ? "font-sans text-[12px] text-ink-dim" : "text-ink-dim"}`}
+            className={`min-w-0 truncate ${c.name ? "font-sans text-[12px] text-ink-dim" : "text-ink-dim"}`}
           >
             {c.name ?? c.command}
           </span>
-          <span className="shrink-0 tabular-nums">
-            pid {c.pid} · up {c.etime} · {fmtKb(c.rssKb)} rss
-            {c.cpu >= 0.5
-              ? ` · ${c.cpu < 10 ? c.cpu.toFixed(1) : c.cpu.toFixed(0)}% of box`
+          {n > 1 && (
+            <span className="shrink-0 rounded-full border border-line px-1.5 text-[10px] leading-4 text-ink-mute">
+              ×{n}
+            </span>
+          )}
+          <span className="ml-auto shrink-0 tabular-nums text-ink-mute/80">
+            {n === 1 ? `pid ${c.pid} · up ${c.etime} · ` : ""}
+            {fmtKb(rssKb)}
+            {cpu >= 0.5
+              ? ` · ${cpu < 10 ? cpu.toFixed(1) : cpu.toFixed(0)}% box`
               : ""}
           </span>
         </li>
@@ -147,6 +157,14 @@ function ChildList({ children }: { children: ChildProc[] }) {
     </ul>
   );
 }
+
+/** State accent: a quiet architectural stripe down the card's left edge. */
+const STRIPE_CLASSES: Record<StripeTone, string> = {
+  danger: "bg-danger/70",
+  gold: "bg-gold/70",
+  mute: "bg-ink-mute/40",
+  auto: "bg-auto/60",
+};
 
 function LiveCard({
   s,
@@ -167,37 +185,39 @@ function LiveCard({
       transition={{ duration: 0.35, ease: "easeOut" }}
     >
       <Panel
-        className={`flex h-full flex-col gap-2.5 p-4 ${
-          needsYou ? "border-gold-dim/60 bg-panel-raised" : ""
+        interactive
+        className={`relative flex h-full flex-col gap-2.5 p-4 pl-5 ${
+          needsYou ? "border-gold-dim/50 bg-panel-raised" : ""
         }`}
       >
+        <span
+          className={`absolute bottom-3 left-0 top-3 w-[2px] rounded-full ${STRIPE_CLASSES[stateStripe(s)]}`}
+        />
         <div className="flex flex-wrap items-center gap-2">
-          <Dot
-            tone={s.state === "approval" ? "danger" : needsYou ? "gold" : s.state === "paused" ? "mute" : "gold"}
-            pulse={s.state !== "paused"}
-          />
-          <span className="truncate text-[15px] font-medium text-ink">
+          <span className="truncate text-[15px] font-medium leading-tight text-ink">
             {s.customTitle ?? (basename(s.cwd) || s.cwd)}
           </span>
           <StateBadge s={s} now={now} />
+          <span className="ml-auto flex items-center gap-2">
+            {s.model && <ModelBadge model={s.model} />}
+            <span className="font-mono text-[11px] text-ink-mute tabular-nums">
+              {s.pid}
+            </span>
+          </span>
+        </div>
+        <div className="-mt-0.5 flex flex-wrap items-center gap-2">
           <ResidenceChip s={s} />
           {s.gitBranch && (
             <Chip tone="mute" mono>
               {s.gitBranch}
             </Chip>
           )}
-          <span className="ml-auto flex items-center gap-2">
-            {s.model && <ModelBadge model={s.model} />}
-            <span className="font-mono text-[11px] text-ink-mute tabular-nums">
-              pid {s.pid}
-            </span>
+          <span className="truncate font-mono text-[11px] text-ink-mute/80">
+            {tildify(s.cwd)}
           </span>
         </div>
-        <div className="-mt-1 truncate font-mono text-[11px] text-ink-mute">
-          {tildify(s.cwd)}
-        </div>
         <ChildList children={s.children ?? []} />
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
           <ContextGauge s={s} />
           <span className="text-[11px] text-ink-mute">
             up {relTime(s.startedAt, now)} · active {relTime(s.lastActivityAt, now)}

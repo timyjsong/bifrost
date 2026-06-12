@@ -58,6 +58,8 @@ export function SessionsPane({
   const groups = groupSessions(filtered);
   const liveCount =
     groups.needsYou.length + groups.working.length + groups.liveHeadless.length;
+  const interactive = live.filter((s) => !s.headless).length;
+  const headless = live.length - interactive;
 
   const updateFilters = (f: SessionFilters) => {
     setFilters(f);
@@ -65,10 +67,10 @@ export function SessionsPane({
   };
 
   return (
-    <section id="sessions" className="scroll-mt-8">
+    <section id="sessions" className="scroll-mt-[72px]">
       <SectionTitle
         title="Sessions"
-        hint={`${live.length} live`}
+        hint={`${interactive} live${headless > 0 ? ` · ${headless} headless` : ""}`}
         right={
           <div className="flex gap-1.5">
             {SESSIONS_VIEWS.map((v) => (

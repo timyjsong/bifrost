@@ -23,7 +23,7 @@ function ClaudeProcs({ system }: { system: SystemInfo }) {
       {claude.map((p) => (
         <div
           key={p.pid}
-          className="flex items-center gap-3 border-b border-line-soft px-4 py-2 text-[12px] last:border-b-0"
+          className="flex items-center gap-3 border-b border-line-soft px-4 py-2 text-[12px] transition-colors last:border-b-0 hover:bg-panel-raised/60"
         >
           <span className="w-14 shrink-0 font-mono text-ink-mute tabular-nums">
             {p.pid}
@@ -105,7 +105,7 @@ export function SystemPane({
   const loadRatio = system.cores ? system.load[0] / system.cores : 0;
 
   return (
-    <section id="system" className="scroll-mt-8">
+    <section id="system" className="scroll-mt-[72px]">
       <SectionTitle title="System" hint={`up ${fmtUptime(system.uptimeSec)}`} />
       <div className="mb-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat

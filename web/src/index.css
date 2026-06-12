@@ -55,6 +55,13 @@ body {
   background: color-mix(in srgb, var(--color-gold) 30%, transparent);
 }
 
+/* keyboard focus — visible, on-brand, never on mouse clicks */
+:focus-visible {
+  outline: 1px solid color-mix(in srgb, var(--color-gold) 65%, transparent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
 /* thin scrollbars, editorial */
 * {
   scrollbar-width: thin;

@@ -14,6 +14,7 @@ function ProjectCard({ p, now }: { p: ProjectInfo; now: number }) {
       transition={{ duration: 0.3, ease: "easeOut" }}
     >
       <Panel
+        interactive
         className={`flex h-full flex-col gap-2 p-4 ${active ? "border-gold-dim/40" : ""}`}
       >
         <div className="flex items-center gap-2">
@@ -72,7 +73,7 @@ export function ProjectsPane({
   const shown = filter ? projects.filter((p) => p.realm === filter) : projects;
 
   return (
-    <section id="projects" className="scroll-mt-8">
+    <section id="projects" className="scroll-mt-[72px]">
       <SectionTitle
         title="Projects"
         hint={`${projects.length} across ${realms.length} realms`}

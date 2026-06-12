@@ -3,13 +3,20 @@ import type { ReactNode } from "react";
 export function Panel({
   children,
   className = "",
+  interactive = false,
 }: {
   children: ReactNode;
   className?: string;
+  /** hover treatment for panels the eye should be invited into */
+  interactive?: boolean;
 }) {
   return (
     <div
-      className={`rounded-xl border border-line-soft bg-panel/70 backdrop-blur-sm ${className}`}
+      className={`rounded-xl border border-line-soft bg-panel/70 backdrop-blur-sm ${
+        interactive
+          ? "transition-[border-color,background-color,box-shadow] duration-200 hover:border-line hover:bg-panel-raised/70 hover:shadow-[0_10px_30px_-18px_rgba(0,0,0,0.9)]"
+          : ""
+      } ${className}`}
     >
       {children}
     </div>
@@ -124,11 +131,13 @@ export function Stat({
 }) {
   return (
     <Panel className="px-4 py-3">
-      <div className="text-[11px] uppercase tracking-[0.14em] text-ink-mute">
+      <div className="text-[10.5px] uppercase tracking-[0.16em] text-ink-mute">
         {label}
       </div>
-      <div className="mt-1 font-mono text-lg text-ink tabular-nums">{value}</div>
-      {sub && <div className="mt-0.5 text-xs text-ink-mute">{sub}</div>}
+      <div className="mt-1.5 font-mono text-[20px] leading-tight text-ink tabular-nums">
+        {value}
+      </div>
+      {sub && <div className="mt-1 text-xs text-ink-mute">{sub}</div>}
       {children}
     </Panel>
   );
