@@ -58,13 +58,25 @@ deploy/atrium.service systemd unit
   dispatches `claude --bg --model haiku`, polls the bg transcript for the result, `claude rm`s
   the session, and caches to `~/.cache/atrium/summaries` keyed by source mtime. Known limitation:
   a *detached* daemon (nohup, reparented to init) is invisible to the child-process check.
+- **Context windows** (v1.3): per live session, switch-aware, resolved in tiers — last
+  `/model` stdout log (ANSI-stripped; sticky via a one-time full-transcript scan + tail
+  updates) → `--model` launch flag from the live cmdline → `~/.claude.json` lastModelUsage
+  when unambiguous → labeled 200K lookup, rendered with `~`. Model→window map pinned
+  empirically: Fable 5 = 1M unconditionally; `[1m]` / "(1M context)" = 1M; other bases 200K.
+  Reference implementation vendored at `tools/context-meter.py` (kept in sync with ledger-api's).
+- **Filters + product chrome** (v1.3): WHERE/MODEL/ACTIVE pill filters over the live
+  sessions (pure logic in `web/src/lib/sessionFilters.ts`); fixed glass command bar with
+  pressure meters; state stripes, ×N child folding, and gauge semantics in
+  `web/src/lib/cardModel.ts`. Classification (residence, model family) is single-sourced
+  in those libs — chips, pills, and filters cannot drift apart.
 
 ## Tests
 
 `bun run check` (repo root) runs the unit suite plus server and web typechecks. The suite
 covers the logic layer — transcript parsing, state derivation, process trees, the summarize
-queue (with injected seams), spec-derived scaling, selectors, formatters. Views are verified
-by eyeball; they're taste, not logic.
+queue (with injected seams), spec-derived scaling, selectors, formatters, window resolution,
+filters, and the card view-model (contract tests). Pure presentation is verified by eyeball;
+any *logic* a cycle adds ships with tests in the convergence commit (CLAUDE.md rule 7).
 
 ## Swappable views
 
