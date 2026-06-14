@@ -189,6 +189,113 @@ async function projectModelsFor(
   }
 }
 
+// The user's saved-default model — the "/model … saved as your default for new
+// sessions" event a bare-launch session inherits (no /model this session, no
+// --model flag). It's logged in whatever session ran /model, possibly a
+// different one, so we scan across all projects' transcripts (newest files
+// first, stopping once no older file could hold a newer event) and cache the
+// result — the default changes rarely. windowSrc "saved-default".
+interface DefaultEvent {
+  ts: number;
+  window: number;
+}
+let defaultCache: { at: number; events: DefaultEvent[] } | null = null;
+// per-file events keyed by mtime: the cold scan reads everything newer than the
+// most-recent default once; after that only changed (active) files are re-read.
+const defaultFileCache = new Map<string, { mtimeMs: number; events: DefaultEvent[] }>();
+const DEFAULT_TTL_MS = 60_000;
+
+async function scanFileForDefaults(path: string): Promise<DefaultEvent[]> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return [];
+  }
+  if (!raw.includes("saved as your default")) return []; // cheap reject (most files)
+  const out: DefaultEvent[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.includes("saved as your default") || !line.includes("local-command-stdout")) {
+      continue;
+    }
+    try {
+      const d = JSON.parse(line);
+      if (d?.type !== "user" || d?.message?.role !== "user") continue;
+      const content = d?.message?.content;
+      if (Array.isArray(content) && content.some((c: any) => c?.type === "tool_result")) {
+        continue; // tool_results can quote stdout — only real user entries count
+      }
+      const text = typeof content === "string" ? content : extractText(content);
+      if (!text?.includes("local-command-stdout")) continue;
+      const window = windowFromModelLog(text);
+      const ts = Date.parse(d?.timestamp ?? "");
+      if (window && Number.isFinite(ts)) out.push({ ts, window });
+    } catch {
+      /* partial line */
+    }
+  }
+  return out;
+}
+
+async function savedDefaultEvents(claudeDir: string, now: number): Promise<DefaultEvent[]> {
+  if (defaultCache && now - defaultCache.at < DEFAULT_TTL_MS) return defaultCache.events;
+  const projectsDir = join(claudeDir, "projects");
+  const files: { path: string; mtimeMs: number }[] = [];
+  try {
+    for (const slug of await readdir(projectsDir)) {
+      const dir = join(projectsDir, slug);
+      let names: string[];
+      try {
+        names = await readdir(dir);
+      } catch {
+        continue;
+      }
+      for (const n of names) {
+        if (!n.endsWith(".jsonl")) continue;
+        try {
+          files.push({ path: join(dir, n), mtimeMs: (await stat(join(dir, n))).mtimeMs });
+        } catch {
+          /* vanished */
+        }
+      }
+    }
+  } catch {
+    /* no projects dir */
+  }
+  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const events: DefaultEvent[] = [];
+  let newestTs = 0;
+  for (const f of files) {
+    if (f.mtimeMs < newestTs) break; // sorted desc: nothing older can be newer
+    const cached = defaultFileCache.get(f.path);
+    const evs =
+      cached && cached.mtimeMs === f.mtimeMs ? cached.events : await scanFileForDefaults(f.path);
+    if (!cached || cached.mtimeMs !== f.mtimeMs) {
+      defaultFileCache.set(f.path, { mtimeMs: f.mtimeMs, events: evs });
+    }
+    for (const e of evs) {
+      events.push(e);
+      if (e.ts > newestTs) newestTs = e.ts;
+    }
+  }
+  events.sort((a, b) => a.ts - b.ts);
+  defaultCache = { at: now, events };
+  return events;
+}
+
+/** The saved default a session starting at `startedAt` inherited — the latest
+ *  default set at or before it. Unknown start → the most recent default. */
+function savedDefaultFor(events: DefaultEvent[], startedAt?: number): number | undefined {
+  if (!events.length) return undefined;
+  if (startedAt === undefined) return events[events.length - 1].window;
+  let win: number | undefined;
+  for (const e of events) {
+    if (e.ts > startedAt) break; // events sorted ascending
+    win = e.window;
+  }
+  return win; // undefined if the session predates every recorded default
+}
+
 function mergeCalls(sessionId: string, calls: ToolCall[] | undefined): void {
   if (!calls?.length) return;
   let idx = callIndexBySession.get(sessionId);
@@ -597,6 +704,7 @@ export async function collectSessions(
   const out: SessionInfo[] = [];
   const seen = new Set<string>();
   const signals = new Map<string, SessionSignals>();
+  const defaultEvents = await savedDefaultEvents(cfg.claudeDir, now);
 
   for (const [sessionId, fs] of fileIndex) {
     const lp = live.get(sessionId);
@@ -615,8 +723,10 @@ export async function collectSessions(
       meter = resolveContextMeter({
         setWindow: modelLogBySession.get(sessionId),
         launchModel: lp.launchModel,
+        savedDefault: savedDefaultFor(defaultEvents, lp.startedAt ?? entry.head.startedAt),
         msgModel: entry.tail.model,
         projectModels: await projectModelsFor(cfg.claudeDir, cwd),
+        tokens: entry.tail.contextTokens,
       });
       mergeCalls(sessionId, entry.tail.calls);
       await scanSidechains(sessionId, fs.path);

@@ -140,8 +140,17 @@ const WIN_BASE = 200_000;
 
 export interface ContextMeter {
   window: number;
-  /** measured sources: model-log, launch-flag, last-model-usage; lookup = default, not measured */
-  windowSrc: "model-log" | "launch-flag" | "last-model-usage" | "lookup";
+  /** measured sources: model-log, launch-flag, saved-default (the /model
+   *  "saved as your default" a bare launch inherits), last-model-usage;
+   *  token-floor = inferred from token overflow (still evidence-based);
+   *  lookup = default, not measured */
+  windowSrc:
+    | "model-log"
+    | "launch-flag"
+    | "saved-default"
+    | "last-model-usage"
+    | "token-floor"
+    | "lookup";
   model?: string; // best current model id, variant-aware where known
 }
 
@@ -185,11 +194,24 @@ export function windowFromModelLog(text: string): number | undefined {
 export function resolveContextMeter(opts: {
   setWindow?: number; // from the last "/model" stdout line, last wins
   launchModel?: string; // from /proc cmdline --model
+  savedDefault?: number; // window of the /model "saved as default" this session inherited
   msgModel?: string; // from the transcript tail's usage entries (base id)
   projectModels?: string[]; // lastModelUsage keys for the session's cwd
+  tokens?: number; // measured context tokens — a hard floor on the window
 }): ContextMeter {
-  const { setWindow, launchModel, msgModel, projectModels } = opts;
+  const { setWindow, launchModel, savedDefault, msgModel, projectModels, tokens } = opts;
   const model = msgModel ?? launchModel;
+
+  // A session can't hold more live tokens than its window. So when the resolved
+  // window comes out under the measured token count, the resolution missed a
+  // [1m] variant (ambiguous lastModelUsage, no /model log or launch flag) and
+  // the real window is 1M. Rescue exactly that case, and tag the model as [1m].
+  const clamp = (m: ContextMeter): ContextMeter => {
+    if (tokens === undefined || tokens <= m.window) return m;
+    const tagged = m.model && !m.model.endsWith("[1m]") ? `${m.model}[1m]` : m.model;
+    return { window: WIN_1M, windowSrc: "token-floor", model: tagged };
+  };
+
   if (setWindow) {
     // the log decides the window; the transcript's usage entries name the
     // model (the display-format log line doesn't carry a usable id)
@@ -197,14 +219,24 @@ export function resolveContextMeter(opts: {
       msgModel && setWindow === WIN_1M && !msgModel.endsWith("[1m]")
         ? `${msgModel}[1m]`
         : model;
-    return { window: setWindow, windowSrc: "model-log", model: display };
+    return clamp({ window: setWindow, windowSrc: "model-log", model: display });
   }
   if (launchModel) {
     // prefer the launch flag's variant-awareness, but a full id from the
     // transcript names the model better than a launch alias like "fable[1m]"
     const display =
       msgModel && launchModel.endsWith("[1m]") ? `${msgModel}[1m]` : (msgModel ?? launchModel);
-    return { window: windowForModel(launchModel), windowSrc: "launch-flag", model: display };
+    return clamp({ window: windowForModel(launchModel), windowSrc: "launch-flag", model: display });
+  }
+  if (savedDefault) {
+    // a bare launch (no /model this session, no --model) inherits the user's
+    // saved default — the authoritative variant signal for this case, read from
+    // the "/model … saved as your default" event in whatever session set it.
+    const display =
+      msgModel && savedDefault === WIN_1M && !msgModel.endsWith("[1m]")
+        ? `${msgModel}[1m]`
+        : model;
+    return clamp({ window: savedDefault, windowSrc: "saved-default", model: display });
   }
   const base = (msgModel ?? "").replace("[1m]", "");
   if (base && projectModels) {
@@ -214,10 +246,10 @@ export function resolveContextMeter(opts: {
       return { window: WIN_1M, windowSrc: "last-model-usage", model: `${base}[1m]` };
     }
     if (hasBase && !has1m) {
-      return { window: windowForModel(base), windowSrc: "last-model-usage", model };
+      return clamp({ window: windowForModel(base), windowSrc: "last-model-usage", model });
     }
   }
-  return { window: WIN_BASE, windowSrc: "lookup", model };
+  return clamp({ window: WIN_BASE, windowSrc: "lookup", model });
 }
 
 export interface TmuxPane {

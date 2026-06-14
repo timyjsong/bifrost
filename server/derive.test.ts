@@ -235,6 +235,47 @@ describe("resolveContextMeter", () => {
       windowSrc: "lookup",
     });
   });
+  test("saved-default: a bare launch inherits the /model saved default", () => {
+    // bare launch (no /model this session, no --model), saved default is 1M
+    expect(
+      resolveContextMeter({ msgModel: "claude-opus-4-8", savedDefault: 1_000_000 }),
+    ).toEqual({
+      window: 1_000_000,
+      windowSrc: "saved-default",
+      model: "claude-opus-4-8[1m]",
+    });
+    // a 200K saved default reads 200K — and counts as measured, not a guess
+    expect(
+      resolveContextMeter({ msgModel: "claude-sonnet-4-6", savedDefault: 200_000 }),
+    ).toMatchObject({ window: 200_000, windowSrc: "saved-default" });
+    // this session's own /model log still wins over the inherited default
+    expect(
+      resolveContextMeter({
+        setWindow: 200_000,
+        savedDefault: 1_000_000,
+        msgModel: "claude-opus-4-8",
+      }),
+    ).toMatchObject({ window: 200_000, windowSrc: "model-log" });
+  });
+  test("token-floor: measured tokens over the resolved window promote it to 1M", () => {
+    // the ambiguous case above, but the session holds 255K tokens — impossible
+    // in a 200K window, so the real window is 1M and the model is the [1m] variant.
+    expect(
+      resolveContextMeter({
+        msgModel: "claude-opus-4-8",
+        projectModels: ["claude-opus-4-8", "claude-opus-4-8[1m]"],
+        tokens: 254_990,
+      }),
+    ).toEqual({
+      window: 1_000_000,
+      windowSrc: "token-floor",
+      model: "claude-opus-4-8[1m]",
+    });
+    // tokens within the resolved window leave it untouched
+    expect(
+      resolveContextMeter({ msgModel: "claude-opus-4-8", tokens: 50_000 }),
+    ).toMatchObject({ window: 200_000, windowSrc: "lookup" });
+  });
 });
 
 describe("nameFromCallIndex", () => {
