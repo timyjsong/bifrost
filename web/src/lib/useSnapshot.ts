@@ -13,38 +13,61 @@ export function useSnapshot(): SnapshotState {
   const bundleId = useRef<number | undefined>(undefined);
 
   useEffect(() => {
+    // A new frontend build changes bundleId — reload to pick it up rather than
+    // sit on a stale page. Checked on EVERY refresh path (stream, watchdog poll,
+    // and foreground) so a backgrounded tab that dropped the stream — the phone
+    // PWA case — still self-heals instead of running old code with fresh data.
+    // Returns true when it triggered a reload, so callers skip the stale setSnap.
+    const applyBundle = (next: Snapshot): boolean => {
+      if (!next.bundleId) return false;
+      if (bundleId.current && bundleId.current !== next.bundleId) {
+        location.reload();
+        return true;
+      }
+      bundleId.current = next.bundleId;
+      return false;
+    };
+
     const es = new EventSource("/api/events");
     es.addEventListener("snapshot", (e) => {
       lastEvent.current = Date.now();
       setConnected(true);
       const next: Snapshot = JSON.parse((e as MessageEvent).data);
-      // a new frontend build was deployed — pick it up instead of going stale
-      if (next.bundleId) {
-        if (bundleId.current && bundleId.current !== next.bundleId) {
-          location.reload();
-          return;
-        }
-        bundleId.current = next.bundleId;
-      }
+      if (applyBundle(next)) return;
       setSnap(next);
     });
     es.onerror = () => setConnected(false);
 
-    // Belt and braces: if the stream goes quiet, poll once and flag it.
-    const watchdog = setInterval(async () => {
-      if (Date.now() - lastEvent.current < 15_000) return;
-      setConnected(false);
+    const pollState = async () => {
       try {
         const r = await fetch("/api/state");
-        if (r.ok) setSnap(await r.json());
+        if (!r.ok) return;
+        const next: Snapshot = await r.json();
+        if (applyBundle(next)) return;
+        setSnap(next);
       } catch {
         // server unreachable; EventSource keeps retrying
       }
+    };
+
+    // Belt and braces: if the stream goes quiet, poll once and flag it.
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastEvent.current < 15_000) return;
+      setConnected(false);
+      void pollState();
     }, 15_000);
+
+    // Mobile suspends the stream when backgrounded; re-check for a new build the
+    // moment the app is foregrounded, so it never lingers on a stale bundle.
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void pollState();
+    };
+    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
       es.close();
       clearInterval(watchdog);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 

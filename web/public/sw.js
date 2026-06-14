@@ -4,6 +4,16 @@
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
+// App-shell freshness. iOS standalone PWAs cling to a cached start page even
+// past `no-cache` — and after a rebuild that page points at asset hashes that no
+// longer exist, so the app loads blank. Serve navigations network-first (cache:
+// no-store) so a rebuild just appears. Hashed assets (immutable) and /api/* are
+// not navigations, so they fall through to the network untouched.
+self.addEventListener("fetch", (event) => {
+  if (event.request.mode !== "navigate") return;
+  event.respondWith(fetch(event.request, { cache: "no-store" }));
+});
+
 self.addEventListener("push", (event) => {
   let data = {};
   try {
