@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import type { SessionInfo, ChildProc } from "../../../../shared/types";
 import { basename, fmtKb, fmtTokens, relTime, tildify } from "../../lib/format";
+import { setSessionAlerts } from "../../lib/push";
 import { splitColumns, queueStatusOf, type QueueStatus } from "../../lib/selectors";
 import { residenceOf } from "../../lib/sessionFilters";
 import {
@@ -85,6 +86,45 @@ function ContextGauge({ s }: { s: SessionInfo }) {
         {fmtWindow(g.window)}
       </span>
     </div>
+  );
+}
+
+/** Per-card alert mute. Optimistic: flips instantly, falls back to the server
+ *  truth (session.alertsEnabled) once the next snapshot lands. */
+function AlertMuteToggle({ sessionId, enabled }: { sessionId: string; enabled: boolean }) {
+  const [optimistic, setOptimistic] = useState<boolean | null>(null);
+  useEffect(() => setOptimistic(null), [enabled]); // server caught up → drop the override
+  const on = optimistic ?? enabled;
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        const next = !on;
+        setOptimistic(next);
+        void setSessionAlerts(sessionId, next).catch(() => setOptimistic(null));
+      }}
+      title={on ? "alerts on — click to mute this session" : "alerts muted — click to unmute"}
+      aria-label={on ? "mute alerts for this session" : "unmute alerts for this session"}
+      aria-pressed={!on}
+      className={`shrink-0 rounded p-0.5 transition-colors ${
+        on ? "text-ink-mute hover:text-gold" : "text-ink-mute/40 hover:text-ink-dim"
+      }`}
+    >
+      {on ? (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
+          <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
+        </svg>
+      ) : (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+          <path d="M18.63 13A17.89 17.89 0 0 1 18 8" />
+          <path d="M6.26 6.26A5.86 5.86 0 0 0 6 8c0 7-3 9-3 9h14" />
+          <path d="M18 8a6 6 0 0 0-9.33-5" />
+          <line x1="1" y1="1" x2="23" y2="23" />
+        </svg>
+      )}
+    </button>
   );
 }
 
@@ -203,6 +243,7 @@ function LiveCard({
             <span className="font-mono text-[11px] text-ink-mute tabular-nums">
               {s.pid}
             </span>
+            <AlertMuteToggle sessionId={s.sessionId} enabled={s.alertsEnabled !== false} />
           </span>
         </div>
         <div className="-mt-0.5 flex flex-wrap items-center gap-2">

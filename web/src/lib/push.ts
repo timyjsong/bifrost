@@ -103,6 +103,16 @@ export async function sendTestPush(): Promise<{ sent: number; pruned: number }> 
   return fetch("/api/push/test", { method: "POST" }).then((r) => r.json());
 }
 
+/** Per-session mute — the per-card toggle. Server keeps the canonical set; the
+ *  next snapshot reflects it via session.alertsEnabled. */
+export async function setSessionAlerts(sessionId: string, enabled: boolean): Promise<void> {
+  await fetch("/api/alerts/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sessionId, enabled }),
+  }).catch(() => {});
+}
+
 // ---- policy ---------------------------------------------------------------
 
 const POLICY_CACHE = "atrium.alertPolicy";

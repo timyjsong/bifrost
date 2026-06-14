@@ -20,13 +20,14 @@ export type SignalId =
   | "swap_fill"
   | "cpu_storm"
   // Tier 2
-  | "session_waiting"
+  | "session_done"
+  | "session_reminder"
+  | "session_approval"
   | "service_down"
   | "safeguard_health"
   | "disk_low"
   // Tier 3
-  | "box_changed"
-  | "long_run_done";
+  | "box_changed";
 
 /**
  * How the engine evaluates a signal's reading each tick:
@@ -144,19 +145,49 @@ export const CATALOG: SignalDef[] = [
   },
   // ---- Tier 2 -----------------------------------------------------------
   {
-    id: "session_waiting",
+    id: "session_done",
     tier: 2,
-    // Per-session edge: fires once when a session crosses the wait threshold,
-    // re-arms only when that session stops waiting. The threshold is applied in
-    // derivation (transitions don't compare); cooldown is an anti-flap floor.
+    // Per-session transition: fires once when a session finishes its work and
+    // is genuinely back on you (response done + nothing running under it). The
+    // run-length floor is applied in derivation (transitions don't compare);
+    // it doubles as flap protection — a sub-floor blip never pings.
     kind: "transition",
     severity: "info",
-    label: "Session waiting for you",
-    desc: "A live session has been awaiting your input a while.",
-    threshold: { min: 1, max: 60, step: 1, unit: "min", label: "waiting longer than" },
+    label: "Session done",
+    desc: "A session finished its work and is back to waiting on you.",
+    threshold: { min: 0, max: 30, step: 1, unit: "min", label: "ran longer than" },
+    defaultEnabled: true,
+    defaultThreshold: 2,
+    defaultCooldownSec: 300,
+  },
+  {
+    id: "session_reminder",
+    tier: 2,
+    // Per-session gauge on minutes-waiting: fires once the session has sat
+    // waiting on you past the threshold, then re-fires every cooldown — the
+    // nag. Gauges already repeat on cooldown, so this needs no new mechanic.
+    kind: "gauge",
+    severity: "info",
+    label: "Still waiting on you",
+    desc: "Reminder that a session is awaiting your input — repeats on the cooldown.",
+    threshold: { min: 1, max: 60, step: 1, unit: "min", label: "remind after waiting" },
+    sustainSec: 0,
     defaultEnabled: true,
     defaultThreshold: 10,
-    defaultCooldownSec: 600,
+    defaultCooldownSec: 900,
+  },
+  {
+    id: "session_approval",
+    tier: 2,
+    // Per-session transition: fires when a session is blocked on a permission
+    // prompt (and nothing is running behind it). Its own signal — a prompt is
+    // a hard block on you, distinct from "done".
+    kind: "transition",
+    severity: "warn",
+    label: "Permission prompt",
+    desc: "A session is blocked on a permission prompt and needs your approval.",
+    defaultEnabled: true,
+    defaultCooldownSec: 300,
   },
   {
     id: "service_down",
@@ -202,18 +233,6 @@ export const CATALOG: SignalDef[] = [
     desc: "Uptime reset or total RAM changed.",
     defaultEnabled: true,
     defaultCooldownSec: 60,
-  },
-  {
-    id: "long_run_done",
-    tier: 3,
-    kind: "transition",
-    severity: "info",
-    label: "Long run finished",
-    desc: "A long-lived session went from working to waiting.",
-    threshold: { min: 5, max: 120, step: 5, unit: "min", label: "run longer than" },
-    defaultEnabled: true,
-    defaultThreshold: 30,
-    defaultCooldownSec: 300,
   },
 ];
 

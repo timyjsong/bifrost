@@ -15,11 +15,12 @@ import type { AlertSources } from "./sources";
 export interface DeriveState {
   prevUptimeSec?: number;
   prevMemTotalKb?: number;
-  /** sessionId → epoch ms the session entered "working", for long-run detection. */
-  working: Record<string, number>;
+  /** sessionId → epoch ms the session entered its current busy (not
+   *  genuinely-done) stretch. Drives the session_done run-length floor. */
+  busySince: Record<string, number>;
 }
 
-export const emptyDeriveState = (): DeriveState => ({ working: {} });
+export const emptyDeriveState = (): DeriveState => ({ busySince: {} });
 
 function sessionName(s: SessionInfo): string {
   return s.customTitle || s.title || basename(s.cwd) || s.sessionId.slice(0, 8);
@@ -29,26 +30,86 @@ function fmtG(kb: number): string {
   return `${(kb / 1024 / 1024).toFixed(1)}G`;
 }
 
-/** One reading per live interactive session: active once it has been awaiting
- *  past the threshold. Per-session so each fires once and re-arms on its own. */
-function sessionWaitingReadings(
+/**
+ * A session is genuinely yours when its turn output is done AND nothing is
+ * still running under it. `children` is the right list to check — it includes
+ * re-attributed fanned-out agents (research / redteam swarms) that the state
+ * machine's ps-tree `childProcs` count misses. Presence, not CPU: an agent
+ * blocked on the network reads ~0% CPU but is very much alive.
+ */
+function genuinelyDone(s: SessionInfo): boolean {
+  return s.state === "awaiting" && (s.children?.length ?? 0) === 0;
+}
+
+/**
+ * The three per-session signals, derived in one pass so they share the
+ * busy/done bookkeeping:
+ *   session_done     — transition; fires once a session completes a run that
+ *                      met the floor and is genuinely back on you.
+ *   session_reminder — gauge on minutes-waiting; the recurring nag.
+ *   session_approval — transition; a permission prompt blocking you (nothing
+ *                      running behind it).
+ * A per-card mute (`s.alertsEnabled === false`) emits no readings for that
+ * session — its latch is then dropped by the engine, so a re-enable can't
+ * false-fire on a stale edge. Bookkeeping still advances while muted.
+ */
+function sessionReadings(
   sessions: SessionInfo[],
-  thresholdMin: number,
+  floorMin: number,
+  prev: DeriveState,
   now: number,
-): SignalReading[] {
+): { readings: SignalReading[]; busySince: Record<string, number> } {
+  const busy = { ...prev.busySince };
+  const live = new Set<string>();
   const out: SignalReading[] = [];
+
   for (const s of sessions) {
     if (!s.live || s.headless) continue;
-    const isWaiting = s.state === "awaiting" || s.state === "approval";
-    const waitMin = isWaiting ? (now - s.lastActivityAt) / 60000 : 0;
+    live.add(s.sessionId);
+
+    const done = genuinelyDone(s);
+    // Track the current busy stretch: mark its start when busy, and on the tick
+    // it finishes, measure how long it ran (for the floor) and clear it.
+    let ranMin = 0;
+    let justCompleted = false;
+    if (!done) {
+      if (busy[s.sessionId] === undefined) busy[s.sessionId] = now;
+    } else {
+      const since = busy[s.sessionId];
+      if (since !== undefined) {
+        ranMin = (now - since) / 60000;
+        justCompleted = true;
+        delete busy[s.sessionId];
+      }
+    }
+
+    if (s.alertsEnabled === false) continue; // per-card mute
+
+    const name = sessionName(s);
+    const waitMin = done ? (now - s.lastActivityAt) / 60000 : 0;
+    const atApproval = s.state === "approval" && (s.children?.length ?? 0) === 0;
+
     out.push({
-      id: "session_waiting",
+      id: "session_done",
       instance: s.sessionId,
-      active: isWaiting && waitMin >= thresholdMin,
-      context: isWaiting ? `${sessionName(s)} · waiting ${Math.round(waitMin)}m` : undefined,
+      active: justCompleted && ranMin >= floorMin,
+      context: justCompleted ? `${name} finished after ${Math.round(ranMin)}m` : undefined,
+    });
+    out.push({
+      id: "session_reminder",
+      instance: s.sessionId,
+      value: waitMin,
+      context: done ? `${name} · waiting ${Math.round(waitMin)}m` : undefined,
+    });
+    out.push({
+      id: "session_approval",
+      instance: s.sessionId,
+      active: atApproval,
+      context: atApproval ? `${name} · waiting on a permission prompt` : undefined,
     });
   }
-  return out;
+  for (const id of Object.keys(busy)) if (!live.has(id)) delete busy[id];
+  return { readings: out, busySince: busy };
 }
 
 function boxChanged(
@@ -62,42 +123,6 @@ function boxChanged(
     return { active: true, context: `RAM resized to ${fmtG(system.mem.totalKb)}` };
   }
   return { active: false };
-}
-
-/** Track working→finished transitions; flag the longest finished run over threshold. */
-function longRun(
-  sessions: SessionInfo[],
-  policy: AlertPolicy,
-  prev: DeriveState,
-  now: number,
-): { active: boolean; context?: string; working: Record<string, number> } {
-  const work = { ...prev.working };
-  const thresholdMs = (policy.signals.long_run_done?.threshold ?? 30) * 60000;
-  const live = new Set<string>();
-  let active = false;
-  let context: string | undefined;
-  let longest = 0;
-
-  for (const s of sessions) {
-    if (!s.live || s.headless) continue;
-    live.add(s.sessionId);
-    if (s.state === "working") {
-      if (work[s.sessionId] === undefined) work[s.sessionId] = now;
-      continue;
-    }
-    const since = work[s.sessionId];
-    if (since !== undefined) {
-      const dur = now - since;
-      delete work[s.sessionId];
-      if (dur >= thresholdMs && dur > longest) {
-        longest = dur;
-        active = true;
-        context = `${sessionName(s)} finished after ${Math.round(dur / 60000)}m`;
-      }
-    }
-  }
-  for (const id of Object.keys(work)) if (!live.has(id)) delete work[id];
-  return { active, context, working: work };
 }
 
 export function deriveReadings(
@@ -116,8 +141,8 @@ export function deriveReadings(
   const topCtx = top ? `top: ${top.command} (${fmtG(top.rssKb)})` : undefined;
 
   const box = boxChanged(system, prev);
-  const lr = longRun(sessions, policy, prev, now);
-  const waitThreshold = policy.signals.session_waiting?.threshold ?? 10;
+  const floorMin = policy.signals.session_done?.threshold ?? 2;
+  const sr = sessionReadings(sessions, floorMin, prev, now);
 
   const readings: SignalReading[] = [
     // Tier 0
@@ -144,7 +169,8 @@ export function deriveReadings(
       value: loadPerCore,
       context: `load ${system.load[0].toFixed(2)} on ${system.cores} cores`,
     },
-    // Tier 2  (session_waiting is per-session — appended below)
+    // Tier 2  (session_done / session_reminder / session_approval are
+    // per-session — appended below)
     {
       id: "service_down",
       active: sources.servicesDown.length > 0,
@@ -158,14 +184,13 @@ export function deriveReadings(
     },
     // Tier 3
     { id: "box_changed", active: box.active, context: box.context },
-    { id: "long_run_done", active: lr.active, context: lr.context },
-    ...sessionWaitingReadings(sessions, waitThreshold, now),
+    ...sr.readings,
   ];
 
   const next: DeriveState = {
     prevUptimeSec: system.uptimeSec,
     prevMemTotalKb: system.mem.totalKb,
-    working: lr.working,
+    busySince: sr.busySince,
   };
   return { readings, next };
 }

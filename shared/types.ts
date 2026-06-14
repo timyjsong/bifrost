@@ -15,7 +15,13 @@ export interface SessionInfo {
   lastActivityAt: number; // epoch ms
   contextTokens?: number;
   contextWindow?: number; // resolved window size (live sessions; switch-aware)
-  contextWindowSrc?: "model-log" | "launch-flag" | "last-model-usage" | "lookup";
+  contextWindowSrc?:
+    | "model-log"
+    | "launch-flag"
+    | "saved-default"
+    | "last-model-usage"
+    | "token-floor"
+    | "lookup";
   transcriptBytes?: number;
   // live-session activity state (derived; live interactive sessions only)
   state?: "awaiting" | "approval" | "paused" | "working";
@@ -26,6 +32,7 @@ export interface SessionInfo {
   overSsh?: boolean; // hangs off a live sshd — dies with the connection
   childProcs?: number;
   children?: ChildProc[]; // leaf subprocesses currently running under this session
+  alertsEnabled?: boolean; // per-card mute (default on); false = no session alerts fire
   nowDoing?: string; // last assistant text snippet
 }
 

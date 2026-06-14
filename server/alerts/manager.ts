@@ -17,6 +17,7 @@ import {
   subscriptionCount,
 } from "./push";
 import { readJson, writeJsonAtomic } from "./store";
+import { setSessionAlerts } from "./sessions";
 
 const POLICY_FILE = "alert-policy.json";
 
@@ -116,6 +117,15 @@ export async function handleAlertRequest(req: Request, url: URL): Promise<Respon
     const body = (await readBody(req)) as { policy?: AlertPolicy } | AlertPolicy | null;
     const incoming = (body && "policy" in body ? body.policy : body) ?? null;
     return Response.json({ policy: await setPolicy(incoming) });
+  }
+
+  if (p === "/api/alerts/session" && req.method === "POST") {
+    const body = (await readBody(req)) as { sessionId?: string; enabled?: boolean } | null;
+    if (!body?.sessionId || typeof body.enabled !== "boolean") {
+      return Response.json({ error: "sessionId + enabled required" }, { status: 400 });
+    }
+    await setSessionAlerts(body.sessionId, body.enabled);
+    return Response.json({ ok: true });
   }
 
   return null;

@@ -26,6 +26,7 @@ import {
 } from "./tasknames";
 import { transcriptPathFor } from "./collectors/sessions";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
+import { mutedSessions } from "./alerts/sessions";
 import type { Snapshot, ProjectInfo } from "../shared/types";
 
 const cfg = loadConfig();
@@ -68,6 +69,7 @@ async function fastTick() {
       }
     }
     const ppidOf = new Map(sysRes.pidTree);
+    const muted = await mutedSessions();
     for (const s of sessRes.sessions) {
       const sig = sessRes.signals.get(s.sessionId);
       if (!sig || !s.pid) continue;
@@ -117,6 +119,7 @@ async function fastTick() {
       s.state = s.headless
         ? undefined
         : deriveState(s, sig, descendants.size);
+      s.alertsEnabled = !muted.has(s.sessionId); // per-card mute (default on)
       if (s.state !== "working") s.nowDoing = undefined; // snippet only meaningful mid-work
     }
     // A live headless claude whose stdout feeds another live session's task
