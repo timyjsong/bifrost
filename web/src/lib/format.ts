@@ -24,6 +24,14 @@ export function fmtKb(kb: number): string {
   return `${kb}K`;
 }
 
+/** Byte sizes from stat — B / K / M / G, one decimal above 1K. */
+export function fmtBytes(n: number): string {
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)}G`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)}M`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)}K`;
+  return `${n}B`;
+}
+
 export function fmtUptime(sec: number): string {
   const d = Math.floor(sec / 86400);
   const h = Math.floor((sec % 86400) / 3600);

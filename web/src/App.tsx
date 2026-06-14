@@ -18,11 +18,13 @@ function Rail({
   host,
   uptimeSec,
   counts,
+  onNav,
 }: {
   connected: boolean;
   host: string;
   uptimeSec: number;
   counts: { sessions: number; needsYou: number; projects: number };
+  onNav: (id: string) => void;
 }) {
   const nav = [
     { id: "sessions", label: "Sessions", count: counts.sessions, alert: counts.needsYou },
@@ -46,6 +48,7 @@ function Rail({
           <a
             key={n.id}
             href={`#${n.id}`}
+            onClick={() => onNav(n.id)}
             className="group flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-ink-dim transition-colors hover:bg-panel-raised hover:text-ink"
           >
             {n.label}
@@ -142,14 +145,14 @@ function MobileTabs({
 }: {
   sections: { id: string; label: string; alert: number }[];
   active: number;
-  onJump: (i: number) => void;
+  onJump: (i: number, id: string) => void;
 }) {
   return (
     <nav className="fixed inset-x-0 top-[52px] z-30 flex border-b border-line-soft bg-bg/80 backdrop-blur-md lg:hidden">
       {sections.map((s, i) => (
         <button
           key={s.id}
-          onClick={() => onJump(i)}
+          onClick={() => onJump(i, s.id)}
           className={`relative flex flex-1 items-center justify-center gap-1.5 py-2.5 text-[12px] font-medium tracking-wide transition-colors ${
             active === i ? "text-gold" : "text-ink-mute"
           }`}
@@ -197,6 +200,12 @@ export default function App() {
   const goToPane = (i: number) => {
     const el = trackRef.current;
     if (el) el.scrollTo({ left: i * el.clientWidth, behavior: "smooth" });
+  };
+  // The open project-file-browser, lifted here so the Projects nav (mobile tab
+  // or desktop rail) can reset it to the grid — "back out to root".
+  const [browsePath, setBrowsePath] = useState<string | null>(null);
+  const onNav = (id: string) => {
+    if (id === "projects") setBrowsePath(null);
   };
   // Open on the Sessions pane (before paint, so no flash of Projects). No-op on
   // desktop (block layout — scrollLeft clamps to 0, top of the stack shows).
@@ -247,7 +256,14 @@ export default function App() {
       id: "projects",
       label: "Projects",
       alert: 0,
-      node: <ProjectsPane projects={snap.projects} now={now} />,
+      node: (
+        <ProjectsPane
+          projects={snap.projects}
+          now={now}
+          openPath={browsePath}
+          onOpenChange={setBrowsePath}
+        />
+      ),
     },
   ];
   // Mobile tab/pane order puts Projects leftmost (desktop DOM order is untouched;
@@ -266,6 +282,7 @@ export default function App() {
           needsYou,
           projects: snap.projects.length,
         }}
+        onNav={onNav}
       />
 
       {/* command bar — fixed product chrome, glass over the page */}
@@ -347,7 +364,14 @@ export default function App() {
         </div>
       </motion.header>
 
-      <MobileTabs sections={mobileSections} active={active} onJump={goToPane} />
+      <MobileTabs
+        sections={mobileSections}
+        active={active}
+        onJump={(i, id) => {
+          onNav(id);
+          goToPane(i);
+        }}
+      />
 
       <main className="pt-[92px] lg:mx-auto lg:max-w-6xl lg:px-5 lg:pb-8 lg:pl-60 lg:pr-10 lg:pt-[76px] xl:mx-0 xl:max-w-none 2xl:mx-auto 2xl:max-w-[1500px]">
         {/* Mobile: a horizontal scroll-snap carousel, one full-screen pane per

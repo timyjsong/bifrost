@@ -3,6 +3,7 @@ import {
   relTime,
   fmtTokens,
   fmtKb,
+  fmtBytes,
   fmtUptime,
   basename,
   tildify,
@@ -41,6 +42,16 @@ describe("fmtKb / fmtUptime", () => {
   test("uptime", () => {
     expect(fmtUptime(5 * 86400 + 4 * 3600)).toBe("5d 4h");
     expect(fmtUptime(2 * 3600 + 30 * 60)).toBe("2h 30m");
+  });
+});
+
+describe("fmtBytes", () => {
+  test("B / K / M / G scaling", () => {
+    expect(fmtBytes(0)).toBe("0B");
+    expect(fmtBytes(512)).toBe("512B");
+    expect(fmtBytes(1536)).toBe("1.5K");
+    expect(fmtBytes(5 * 1024 * 1024)).toBe("5.0M");
+    expect(fmtBytes(3 * 1024 ** 3)).toBe("3.0G");
   });
 });
 

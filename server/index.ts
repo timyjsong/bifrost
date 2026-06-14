@@ -26,6 +26,7 @@ import {
 } from "./tasknames";
 import { transcriptPathFor } from "./collectors/sessions";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
+import { handleFilesRequest } from "./files/handler";
 import { mutedSessions } from "./alerts/sessions";
 import type { Snapshot, ProjectInfo } from "../shared/types";
 
@@ -321,6 +322,12 @@ const server = Bun.serve({
     }
     if (url.pathname.startsWith("/api/push/") || url.pathname.startsWith("/api/alerts/")) {
       const res = await handleAlertRequest(req, url);
+      if (res) return res;
+    }
+    if (url.pathname === "/api/files") {
+      // Roots are the live project dirs — you can only browse INTO a project the
+      // dashboard already shows, never the realm above it or anything outside.
+      const res = await handleFilesRequest(url, projects.map((p) => p.path));
       if (res) return res;
     }
     if (url.pathname === "/api/events") {

@@ -63,6 +63,18 @@ export interface ProjectInfo {
   recentSessions: number;
 }
 
+export interface FileEntry {
+  name: string;
+  type: "dir" | "file" | "symlink" | "other";
+  size: number; // bytes (lstat — symlinks report the link's own size)
+  mtimeMs: number;
+}
+
+export interface DirListing {
+  path: string; // canonical (realpath'd) directory that was listed
+  entries: FileEntry[];
+}
+
 export interface ProcInfo {
   pid: number;
   ppid: number;
