@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { useNow, useSnapshot } from "./lib/useSnapshot";
 import { fmtKb, fmtUptime } from "./lib/format";
@@ -26,9 +26,9 @@ function Rail({
 }) {
   const nav = [
     { id: "sessions", label: "Sessions", count: counts.sessions, alert: counts.needsYou },
-    { id: "projects", label: "Projects", count: counts.projects, alert: 0 },
     { id: "system", label: "System", count: undefined, alert: 0 },
     { id: "alerts", label: "Alerts", count: undefined, alert: 0 },
+    { id: "projects", label: "Projects", count: counts.projects, alert: 0 },
   ];
   return (
     <aside className="fixed inset-y-0 left-0 z-50 hidden w-48 flex-col border-r border-line-soft bg-bg/60 px-6 py-7 backdrop-blur-sm lg:flex">
@@ -131,6 +131,40 @@ function Meter({
   );
 }
 
+/** Mobile-only section switcher: a fixed tab strip under the command bar that
+ *  shows which pane you're on and jumps to one on tap. Hidden at lg (the rail
+ *  takes over). The swipe itself is native scroll-snap — this just indicates +
+ *  shortcuts it. */
+function MobileTabs({
+  sections,
+  active,
+  onJump,
+}: {
+  sections: { id: string; label: string; alert: number }[];
+  active: number;
+  onJump: (i: number) => void;
+}) {
+  return (
+    <nav className="fixed inset-x-0 top-[52px] z-30 flex border-b border-line-soft bg-bg/80 backdrop-blur-md lg:hidden">
+      {sections.map((s, i) => (
+        <button
+          key={s.id}
+          onClick={() => onJump(i)}
+          className={`relative flex flex-1 items-center justify-center gap-1.5 py-2.5 text-[12px] font-medium tracking-wide transition-colors ${
+            active === i ? "text-gold" : "text-ink-mute"
+          }`}
+        >
+          {s.label}
+          {s.alert > 0 && <Dot tone="gold" pulse />}
+          {active === i && (
+            <span className="absolute inset-x-3 bottom-0 h-[2px] rounded-full bg-gold" />
+          )}
+        </button>
+      ))}
+    </nav>
+  );
+}
+
 export default function App() {
   const { snap, connected } = useSnapshot();
   const now = useNow();
@@ -144,6 +178,35 @@ export default function App() {
   useEffect(() => {
     document.title = needsYou > 0 ? `(${needsYou}) Atrium` : "Atrium";
   }, [needsYou]);
+
+  // Mobile carousel: the horizontal scroll-snap track drives the active pane;
+  // tapping a tab (or the needs-you pill) scrolls it. Inert on desktop, where
+  // the track reverts to a vertical stack and these never fire.
+  // Projects sits leftmost on mobile, but the carousel OPENS on Sessions — so
+  // Sessions is the mobile visual index 1 (Projects 0, System 2, Alerts 3).
+  const SESSIONS_PANE = 1;
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [active, setActive] = useState(SESSIONS_PANE);
+  const didInit = useRef(false);
+  const onTrackScroll = () => {
+    const el = trackRef.current;
+    if (!el || !el.clientWidth) return;
+    const i = Math.round(el.scrollLeft / el.clientWidth);
+    setActive((prev) => (prev === i ? prev : i));
+  };
+  const goToPane = (i: number) => {
+    const el = trackRef.current;
+    if (el) el.scrollTo({ left: i * el.clientWidth, behavior: "smooth" });
+  };
+  // Open on the Sessions pane (before paint, so no flash of Projects). No-op on
+  // desktop (block layout — scrollLeft clamps to 0, top of the stack shows).
+  useLayoutEffect(() => {
+    if (didInit.current) return;
+    const el = trackRef.current;
+    if (!el || !el.clientWidth) return;
+    el.scrollLeft = SESSIONS_PANE * el.clientWidth;
+    didInit.current = true;
+  });
 
   if (!snap || !snap.generatedAt) {
     return (
@@ -167,6 +230,30 @@ export default function App() {
   const claudeRatio = sys.mem.totalKb
     ? sys.claudeTotalRssKb / sys.mem.totalKb
     : 0;
+
+  // Order is shared by the desktop stack, the rail, and the mobile swipe panes.
+  const sections = [
+    {
+      id: "sessions",
+      label: "Sessions",
+      alert: needsYou,
+      node: (
+        <SessionsPane sessions={snap.sessions} now={now} summarize={snap.summarize} />
+      ),
+    },
+    { id: "system", label: "System", alert: 0, node: <SystemPane system={snap.system} now={now} /> },
+    { id: "alerts", label: "Alerts", alert: 0, node: <AlertsPane /> },
+    {
+      id: "projects",
+      label: "Projects",
+      alert: 0,
+      node: <ProjectsPane projects={snap.projects} now={now} />,
+    },
+  ];
+  // Mobile tab/pane order puts Projects leftmost (desktop DOM order is untouched;
+  // the Projects pane just gets `order-first` to float left under flex). Tabs and
+  // the scroll index both follow this visual order.
+  const mobileSections = [sections[sections.length - 1], ...sections.slice(0, -1)];
 
   return (
     <div className="min-h-screen">
@@ -242,6 +329,12 @@ export default function App() {
             {needsYou > 0 && (
               <a
                 href="#sessions"
+                onClick={(e) => {
+                  if (window.matchMedia("(max-width: 1023px)").matches) {
+                    e.preventDefault();
+                    goToPane(SESSIONS_PANE);
+                  }
+                }}
                 className="rounded-full border border-gold-dim/70 bg-gold/10 px-2.5 py-0.5 text-[11px] font-medium text-gold transition-colors hover:bg-gold/20"
               >
                 {needsYou} need{needsYou === 1 ? "s" : ""} you
@@ -254,19 +347,31 @@ export default function App() {
         </div>
       </motion.header>
 
-      <main className="mx-auto max-w-6xl px-5 pb-8 pt-[76px] lg:pl-60 lg:pr-10 xl:mx-0 xl:max-w-none 2xl:mx-auto 2xl:max-w-[1500px]">
-        <div className="space-y-14">
-          <SessionsPane
-            sessions={snap.sessions}
-            now={now}
-            summarize={snap.summarize}
-          />
-          <ProjectsPane projects={snap.projects} now={now} />
-          <SystemPane system={snap.system} now={now} />
-          <AlertsPane />
+      <MobileTabs sections={mobileSections} active={active} onJump={goToPane} />
+
+      <main className="pt-[92px] lg:mx-auto lg:max-w-6xl lg:px-5 lg:pb-8 lg:pl-60 lg:pr-10 lg:pt-[76px] xl:mx-0 xl:max-w-none 2xl:mx-auto 2xl:max-w-[1500px]">
+        {/* Mobile: a horizontal scroll-snap carousel, one full-screen pane per
+            section, each with its own vertical scroll. Desktop (lg): reverts to
+            the familiar vertical stack — same DOM, no double-mount. */}
+        <div
+          ref={trackRef}
+          onScroll={onTrackScroll}
+          className="flex h-[calc(100dvh-92px)] snap-x snap-mandatory overflow-x-auto overflow-y-hidden overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:block lg:h-auto lg:snap-none lg:space-y-14 lg:overflow-visible"
+        >
+          {sections.map((s) => (
+            <section
+              key={s.id}
+              id={s.id}
+              className={`h-full w-full shrink-0 snap-start snap-always overflow-y-auto overscroll-y-contain px-5 pb-10 pt-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden lg:h-auto lg:w-auto lg:shrink lg:overflow-visible lg:px-0 lg:pb-0 lg:pt-0 ${
+                s.id === "projects" ? "order-first lg:order-none" : ""
+              }`}
+            >
+              {s.node}
+            </section>
+          ))}
         </div>
 
-        <footer className="mt-16 flex items-baseline justify-between border-t border-line-soft pt-4 text-[11px] text-ink-mute">
+        <footer className="mt-16 hidden items-baseline justify-between border-t border-line-soft pt-4 text-[11px] text-ink-mute lg:flex">
           <span>view-only by design — atrium watches, it doesn't poke</span>
           <span className="font-mono text-[10.5px] text-ink-mute/60">
             {sys.hostname}
