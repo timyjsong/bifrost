@@ -25,6 +25,7 @@ import {
   taskOwnerFromLink,
 } from "./tasknames";
 import { transcriptPathFor } from "./collectors/sessions";
+import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import type { Snapshot, ProjectInfo } from "../shared/types";
 
 const cfg = loadConfig();
@@ -170,6 +171,12 @@ async function fastTick() {
       system: sysRes.info,
     };
     broadcast(snapshot);
+    // Derive alert signals from the same poll and push on policy-passing edges.
+    // After broadcast so a source hiccup never delays the dashboard; robust on
+    // its own, but caught here too — alerting must never disrupt the tick.
+    await evaluateAlerts(sysRes.info, sessions, snapshot.generatedAt).catch((err) =>
+      console.error("[atrium] alert eval failed:", err),
+    );
   } catch (err) {
     console.error("[atrium] fast tick failed:", err);
   } finally {
@@ -308,6 +315,10 @@ const server = Bun.serve({
         const status = message === "unknown session" ? 404 : 500;
         return Response.json({ error: message }, { status });
       }
+    }
+    if (url.pathname.startsWith("/api/push/") || url.pathname.startsWith("/api/alerts/")) {
+      const res = await handleAlertRequest(req, url);
+      if (res) return res;
     }
     if (url.pathname === "/api/events") {
       return sseResponse();

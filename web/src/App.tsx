@@ -7,6 +7,7 @@ import { Dot } from "./components/ui";
 import { SessionsPane } from "./components/SessionsPane";
 import { ProjectsPane } from "./components/ProjectsPane";
 import { SystemPane } from "./components/SystemPane";
+import { AlertsPane } from "./components/AlertsPane";
 
 function scrollTop() {
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -27,6 +28,7 @@ function Rail({
     { id: "sessions", label: "Sessions", count: counts.sessions, alert: counts.needsYou },
     { id: "projects", label: "Projects", count: counts.projects, alert: 0 },
     { id: "system", label: "System", count: undefined, alert: 0 },
+    { id: "alerts", label: "Alerts", count: undefined, alert: 0 },
   ];
   return (
     <aside className="fixed inset-y-0 left-0 z-50 hidden w-48 flex-col border-r border-line-soft bg-bg/60 px-6 py-7 backdrop-blur-sm lg:flex">
@@ -261,6 +263,7 @@ export default function App() {
           />
           <ProjectsPane projects={snap.projects} now={now} />
           <SystemPane system={snap.system} now={now} />
+          <AlertsPane />
         </div>
 
         <footer className="mt-16 flex items-baseline justify-between border-t border-line-soft pt-4 text-[11px] text-ink-mute">
