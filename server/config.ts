@@ -28,6 +28,11 @@ export interface BifrostConfig {
     maxQueue: number;
     timeoutMs: number;
   };
+  auth: {
+    origins: string[]; // allowed Origin header values (exact match) — anti-CSRF
+    hosts: string[]; // allowed Host header values — anti DNS-rebinding
+    enrollUrl: string; // HTTPS base the enroll CLI/QR points devices to
+  };
 }
 
 export const repoRoot = resolve(fileURLToPath(import.meta.url), "../..");
@@ -46,5 +51,7 @@ export function loadConfig(): BifrostConfig {
   raw.realms = raw.realms.map((r) => ({ ...r, path: expandHome(r.path) }));
   raw.summarize.scratchDir = expandHome(raw.summarize.scratchDir);
   raw.summarize.cacheDir = expandHome(raw.summarize.cacheDir);
+  // Fail closed: a config without auth → empty allowlists → every /api/* denied.
+  raw.auth = raw.auth ?? { origins: [], hosts: [], enrollUrl: "" };
   return raw;
 }

@@ -1,50 +1,139 @@
 # Phase 0 (Build 0) — Auth / Security
 
-**Status:** PLANNED — agreed in principle; full requirements + ACs locked at phase
-start. No greenlight yet.
+**Status: GREENLIT — building (2026-06-16). Requirements + ACs locked; I
+greenlit the full hardened spec.**
 
-**Why first:** hard ship-gate on the very first write endpoint. Cross-cutting,
-independently testable, de-risks everything after. There must be no window where a
-write-capable endpoint exists unauthenticated.
+Robustness dialed UP per my explicit call (2026-06-16): *"make it more robust
+than you currently think it needs — once we're past Phase 0 there's a chance I
+forget to harden it later."* So Build 0 is specced to be **safe to leave
+unattended indefinitely**, within the structural ceiling of a bearer-token scheme
+(see *Ceiling*). Setup must stay **easy** (my other constraint).
+
+**Why first:** hard ship-gate on the very first write endpoint — there must be no
+window where a write-capable endpoint exists unauthenticated. Cross-cutting,
+independently testable, de-risks everything after.
 
 ## Goal
-A single-user auth layer that lets only my enrolled devices drive Bifrost, robust
-against the one vector the tailnet perimeter does NOT cover: the browser tricked into
-cross-origin writes (CSRF / DNS-rebinding).
+Single-user auth: only my enrolled devices can drive Bifrost. Robust against the
+one vector the tailnet perimeter does NOT cover — the browser tricked into
+cross-origin writes (CSRF / DNS-rebinding) — and hardened to be set-and-forget.
 
-## Decision (Option A)
-- **Bearer token in a custom header** (e.g. `X-Bifrost-Token`) — the custom-header
-  requirement kills CSRF by construction (browsers won't attach it cross-origin
-  without a preflight Bifrost refuses).
-- **Strict CORS + Origin/Host allowlist** (kills DNS-rebinding).
-- **Auth enforced IN the app**, not just caddy — both routes (raw `:4444` and the
-  HTTPS serve route) must enforce it; a caddy-only gate leaves `:4444` open.
-- **Per-device one-time enrollment**; the PWA persists the token. Reuse the `data/`
-  secret pattern (VAPID keys, 0700/0600).
-- **Push usage to the HTTPS route** (`https://dev.your-tailnet.ts.net:8444`) — secure
-  context for credentials / service worker / push.
+## Locked decisions
+1. **Gate everything, not just writes.** Once auth exists, gate-all is simpler (no
+   read/write classification to maintain) and session content (transcripts,
+   think-streams) is sensitive. The currently-open read-only dashboard stops working
+   until a device is enrolled — accepted.
+2. **Per-device random opaque tokens.** 256-bit from CSPRNG (`crypto.randomBytes`),
+   base64url. Stored server-side as a set in `data/` (0600), reusing the VAPID
+   secret pattern (`server/alerts/vapid.ts`). No JWT/signing — opaque + server-side
+   store gives free revocation and zero crypto surface. Compared in **constant time**
+   (`timingSafeEqual`).
+3. **Revocation = minimal, per-device.** Revoke one device = delete its entry;
+   nuke-all = clear the set. No rotation/refresh infra.
+4. **Enrollment: box-minted one-time code → token.** Easy AND gated (see below).
 
-Not chosen: B (Tailscale identity passthrough — unneeded, no other users; possible
-later layer). C (passkeys/WebAuthn — future upgrade, over-weight now).
+## Enrollment model (keystone — easy setup *and* robust)
+Root of trust = "can read from the box as that user" — the same boundary as everything
+else on this machine.
+- A CLI on the box (e.g. `bun run enroll`) mints a **one-time enrollment code**
+  (high-entropy, single-use, short TTL ~10 min) and renders it as a copyable string
+  **and a QR** (QR encodes the HTTPS enroll URL + code).
+- On the device: open the PWA / scan the QR → POST the code to the pre-auth
+  `/api/enroll` → server validates (single-use + unexpired) → issues a per-device
+  256-bit token + device label → PWA persists it (IndexedDB) → every later request
+  carries `X-Bifrost-Token`.
+- **Easy:** scan the QR from the box, done. **Robust:** enrollment requires box
+  access to obtain the code — reaching the tailnet IP alone can't mint a token.
+
+## The gate (fail-closed, central, single chokepoint)
+- The server is a single `Bun.serve({ fetch })` handler (`server/index.ts:297`) —
+  exactly one place every request flows through. The gate sits at the TOP of `fetch`,
+  before route dispatch.
+- **Default-deny:** every request → 401 unless it (a) carries a valid token, or
+  (b) hits the explicit **pre-auth allowlist**, kept deliberately tiny:
+  `/api/health`, `/api/enroll`, and the static shell (so the PWA can load to show the
+  enroll screen). NOT opt-in per route — default-deny, allowlist the exceptions.
+- **Fail-closed on errors:** token store missing/corrupt/unreadable → deny all.
+  Never fail open.
+- **Both routes enforce identically** — enforcement is in-app, so raw `:4444` and the
+  HTTPS serve route are gated the same. A caddy-only gate would leave `:4444` open —
+  rejected.
+
+## Anti-CSRF / anti-rebinding (Option A, hardened)
+- **Custom header `X-Bifrost-Token`** — browsers won't attach a custom header
+  cross-origin without a preflight Bifrost refuses → CSRF blocked by construction.
+- **Strict CORS** — explicit origin allowlist (the two known tailnet origins only),
+  no wildcard, preflight refused for disallowed origins.
+- **Host/Origin allowlist** — reject any request whose Host ∉
+  {`100.100.100.100:4444`, `dev.your-tailnet.ts.net:8444`} → DNS-rebinding blocked.
+- **SSE constraint (build-time):** native `EventSource` CANNOT set a custom header.
+  `/api/events` must move to a fetch-stream reader (ReadableStream) so the
+  custom-header token applies uniformly. Do NOT pass the token via query param for
+  SSE — that reintroduces CSRF and leaks the token into logs/referrers.
+
+## Hardening (set-and-forget) — added per my call
+- Constant-time token compare (`timingSafeEqual`).
+- 256-bit CSPRNG tokens; enrollment codes single-use + TTL.
+- **Brute-force throttle:** after N failed auths (per-IP, in-memory) → backoff/429.
+  Tailnet single-user makes online guessing unlikely; the throttle neutralizes it
+  regardless.
+- **Security headers** on all responses: strict **CSP** (compensating control — the
+  token is necessarily JS-readable, so CSP is what stops an XSS from exfiltrating it),
+  `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`; HSTS on the HTTPS
+  route.
+- **Minimal auth-event log** (enroll / revoke / repeated-failure) to `data/` —
+  observability so anomalies are visible without active monitoring. *[The one
+  judgment-add; cut it if you want Build 0 leaner.]*
+
+## Ceiling (honest bound — "more robust" is not infinite here)
+The custom-header bearer design inherently leaves the token JS-readable in the PWA
+(it must set the header). CSP mitigates but does not eliminate XSS-exfil. Exceeding
+that ceiling means passkeys/WebAuthn (Option C) — deliberately deferred as
+over-weight now. Build 0 is "as robust as a hardened bearer scheme gets"; the next
+tier is a *different scheme*, not more effort.
+
+**Considered switching to passkeys for the build-and-forget framing (2026-06-16) —
+rejected.** The required CSRF/CORS/Host armor is *fixed regardless of identity
+primitive*, because the threat is the authenticated browser tricked (CSRF/rebinding),
+not an unauthenticated outsider — bearer, passkey, and Tailscale-identity all need it
+on top. Given that, the identity layer should be the simplest robust thing that works
+everywhere. Passkeys can't cover the raw `:4444` route at all (WebAuthn needs a secure
+context + a registrable RP ID; a bare `http://IP:4444` has neither), forcing either
+dropping that route or a bearer fallback anyway — and they add protocol surface that
+rots, the opposite of forget-it-safely. They'd be the move only if Bifrost were ever
+exposed beyond the tailnet (standing rule: never Funnel) or went multi-user. The
+durable hardening of the bearer scheme's one weakness (token is JS-readable) is killed
+at the source — strict CSP + render session content as text, never raw HTML — which
+helps regardless of auth primitive.
+
+## Explicitly NOT in Build 0 (boundary on "more robust")
+- Passkeys / WebAuthn (Option C — future upgrade).
+- Tailscale identity passthrough (Option B — no other users to distinguish).
+- Token rotation / expiry-refresh machinery (minimal regenerate stays).
+- Multi-user / roles / permissions (single-user tool).
+- Encrypting the token store beyond 0600 (0600-as-the-user IS the trust boundary;
+  encrypting just moves the key problem).
 
 ## Standing rules
 - **NEVER Funnel Bifrost.** (Funnel currently routes to a separate secret-path-gated
   service on `:18080`, not Bifrost — verified 2026-06-16. Keep it that way.)
 - Accepted residual: device compromise = full access (unavoidable for a personal tool).
 
-## Open / to-decide at phase start
-- Enrollment UX: paste token vs QR-from-the-box vs one-time link.
-- Gate reads too, or only writes? (Lean: gate everything once auth exists — session
-  content is now sensitive, and it's simpler.)
-- Token rotation / revocation (likely minimal v1: regenerate + re-enroll).
-- Where the token is minted/stored on the box; format (random vs signed).
-
 ## Verification (success criteria → tests)
-- Unauthenticated request to a write endpoint → 401.
+- Unauthenticated request to any non-allowlisted endpoint → 401.
 - Cross-origin request (forged Origin / no custom header) → rejected.
-- Bad/expired token → 401.
+- Request with disallowed Host header → rejected (anti-rebinding).
+- Bad / expired / revoked token → 401.
 - Enrolled device with valid token → 200.
 - Both routes (`:4444` and HTTPS) enforce identically.
+- Token store unreadable → deny-all (fail closed), not open.
+- Enrollment: valid one-time code → token issued; reused code → rejected; expired
+  code → rejected.
+- Brute-force: N rapid failures → 429/backoff.
+- SSE reachable only with a token (fetch-stream, not `EventSource`).
+- Auth/validation logic lives in pure, separately-tested modules (the
+  `server/files/confine.ts` analog) — tested against forged Origins, bad Hosts, and
+  malformed/timing-attack token inputs.
 
 ## Gate
-I greenlight Build 0's locked requirements before code starts.
+I greenlight this locked spec before code starts.
