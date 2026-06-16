@@ -4,3 +4,5 @@ web/dist/
 .env
 data/
 studio/
+__pycache__/
+*.pyc
