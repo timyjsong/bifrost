@@ -1,4 +1,4 @@
-/* Atrium service worker — Web Push receiver. Hand-written (no build step) so the
+/* Bifrost service worker — Web Push receiver. Hand-written (no build step) so the
  * push/notification handlers stay dead simple and fully in our control. */
 
 self.addEventListener("install", () => self.skipWaiting());
@@ -19,9 +19,9 @@ self.addEventListener("push", (event) => {
   try {
     data = event.data ? event.data.json() : {};
   } catch {
-    data = { title: "Atrium", body: event.data ? event.data.text() : "" };
+    data = { title: "Bifrost", body: event.data ? event.data.text() : "" };
   }
-  const title = data.title || "Atrium";
+  const title = data.title || "Bifrost";
   event.waitUntil(
     self.registration.showNotification(title, {
       body: data.body || "",

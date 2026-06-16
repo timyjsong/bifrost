@@ -10,7 +10,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { repoRoot } from "../config";
 
-export const dataDir = process.env.ATRIUM_DATA_DIR ?? join(repoRoot, "data");
+export const dataDir = process.env.BIFROST_DATA_DIR ?? join(repoRoot, "data");
 
 export async function readJson<T>(file: string, fallback: T): Promise<T> {
   try {

@@ -160,7 +160,7 @@ function EnableBar({
     );
   }
   const msg: Record<string, string> = {
-    "needs-homescreen": "Add Atrium to your Home Screen first, then enable alerts.",
+    "needs-homescreen": "Add Bifrost to your Home Screen first, then enable alerts.",
     denied: "Notifications are blocked — turn them back on in your browser/site settings.",
     unsupported: "This browser can't deliver push notifications.",
   };

@@ -171,10 +171,10 @@ async function fastTick() {
     // After broadcast so a source hiccup never delays the dashboard; robust on
     // its own, but caught here too — alerting must never disrupt the tick.
     await evaluateAlerts(sysRes.info, sessions, snapshot.generatedAt).catch((err) =>
-      console.error("[atrium] alert eval failed:", err),
+      console.error("[bifrost] alert eval failed:", err),
     );
   } catch (err) {
-    console.error("[atrium] fast tick failed:", err);
+    console.error("[bifrost] fast tick failed:", err);
   } finally {
     fastBusy = false;
   }
@@ -187,7 +187,7 @@ async function slowTick() {
   try {
     projects = await collectProjects(cfg, snapshot.sessions);
   } catch (err) {
-    console.error("[atrium] slow tick failed:", err);
+    console.error("[bifrost] slow tick failed:", err);
   } finally {
     slowBusy = false;
   }
@@ -268,7 +268,7 @@ const MIME: Record<string, string> = {
 async function serveStatic(pathname: string): Promise<Response> {
   if (!existsSync(distDir)) {
     return new Response(
-      "<!doctype html><title>Atrium</title><body style=\"background:#0a0a0a;color:#e5e5e5;font-family:sans-serif\"><p>Atrium API is up. Frontend not built yet — run <code>bun run build</code> in web/.</p>",
+      "<!doctype html><title>Bifrost</title><body style=\"background:#0a0a0a;color:#e5e5e5;font-family:sans-serif\"><p>Bifrost API is up. Frontend not built yet — run <code>bun run build</code> in web/.</p>",
       { headers: { "content-type": "text/html; charset=utf-8" } },
     );
   }
@@ -338,9 +338,9 @@ await fastTick();
 setInterval(fastTick, cfg.refresh.fastMs);
 setInterval(slowTick, cfg.refresh.slowMs);
 
-console.log(`[atrium] watching from http://${server.hostname}:${server.port}`);
+console.log(`[bifrost] watching from http://${server.hostname}:${server.port}`);
 const lim = summarizeLimits(cfg);
 console.log(
-  `[atrium] summarize: ${lim.maxInFlight} concurrent slots, ${lim.reserveMb}MB reserve floor ` +
+  `[bifrost] summarize: ${lim.maxInFlight} concurrent slots, ${lim.reserveMb}MB reserve floor ` +
     `(derived from ${(lim.totalMb / 1024).toFixed(1)}G box)`,
 );

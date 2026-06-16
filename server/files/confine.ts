@@ -15,8 +15,8 @@ import { sep } from "node:path";
 /**
  * Is `child` the same path as `root`, or genuinely nested under it? Both must be
  * absolute, already-canonical paths. The trailing-separator guard closes the
- * prefix trap: `/home/you/projects/atrium-secrets` must NOT count as inside
- * `/home/you/projects/atrium`.
+ * prefix trap: `/home/you/projects/bifrost-secrets` must NOT count as inside
+ * `/home/you/projects/bifrost`.
  */
 export function isWithinRoot(child: string, root: string): boolean {
   if (child === root) return true;

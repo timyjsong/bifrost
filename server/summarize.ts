@@ -1,7 +1,7 @@
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile, readdir, stat, open } from "node:fs/promises";
 import { join } from "node:path";
-import type { AtriumConfig } from "./config";
+import type { BifrostConfig } from "./config";
 import { transcriptPathFor, transcriptMtimeFor } from "./collectors/sessions";
 
 export interface SummaryResult {
@@ -72,7 +72,7 @@ export async function extractConversation(path: string): Promise<string> {
 
 /** Wait for the dispatched bg session to finish and return its final text. */
 async function awaitBgResult(
-  cfg: AtriumConfig,
+  cfg: BifrostConfig,
   shortId: string,
 ): Promise<string> {
   const slug = cfg.summarize.scratchDir.replace(/[/.]/g, "-");
@@ -138,7 +138,7 @@ async function awaitBgResult(
 }
 
 async function runSummarize(
-  cfg: AtriumConfig,
+  cfg: BifrostConfig,
   sessionId: string,
   sourcePath: string,
   sourceMtime: number,
@@ -200,7 +200,7 @@ async function runSummarize(
 
 // ---- queue --------------------------------------------------------------
 // Clicks past maxInFlight queue (FIFO) instead of blocking. A memory floor
-// holds dispatch when the box is tight, and a depth cap protects Atrium's own
+// holds dispatch when the box is tight, and a depth cap protects Bifrost's own
 // runtime from unbounded pile-up. Per-session dedupe: one job per session.
 
 interface Pending {
@@ -217,7 +217,7 @@ let pumpTimer: ReturnType<typeof setTimeout> | null = null;
 // Test seams — production uses the real implementations; tests inject fakes
 // so queue mechanics are exercised without spawning claude or reading /proc.
 let memInfoImpl: () => { totalMb: number; availMb: number };
-let jobRunner: (cfg: AtriumConfig, sessionId: string) => Promise<SummaryResult>;
+let jobRunner: (cfg: BifrostConfig, sessionId: string) => Promise<SummaryResult>;
 let sourceLookup: {
   path: (id: string) => string | undefined;
   mtime: (id: string) => number | undefined;
@@ -260,7 +260,7 @@ memInfoImpl = memInfo;
 
 /** Concurrency derived from live total RAM: how many ~perJobMb jobs fit in the
  *  share of memory summaries are allowed, clamped to [2, cap]. Scales with the box. */
-export function deriveMaxInFlight(cfg: AtriumConfig, totalMb: number): number {
+export function deriveMaxInFlight(cfg: BifrostConfig, totalMb: number): number {
   if (!totalMb) return 2;
   const derived = Math.floor(
     (totalMb * cfg.summarize.ramShare) / cfg.summarize.perJobMb,
@@ -274,7 +274,7 @@ export function summarizeState(): { active: string[]; queued: string[] } {
 }
 
 /** Derived limits for the current box — for the startup log. */
-export function summarizeLimits(cfg: AtriumConfig): {
+export function summarizeLimits(cfg: BifrostConfig): {
   maxInFlight: number;
   totalMb: number;
   reserveMb: number;
@@ -287,7 +287,7 @@ export function summarizeLimits(cfg: AtriumConfig): {
   };
 }
 
-function pump(cfg: AtriumConfig) {
+function pump(cfg: BifrostConfig) {
   if (pumpTimer) {
     clearTimeout(pumpTimer);
     pumpTimer = null;
@@ -316,7 +316,7 @@ function pump(cfg: AtriumConfig) {
 
 /** Resolve a session to a summary: cache hit, or a fresh bg generation. */
 async function produceSummary(
-  cfg: AtriumConfig,
+  cfg: BifrostConfig,
   sessionId: string,
 ): Promise<SummaryResult> {
   const sourcePath = sourceLookup.path(sessionId);
@@ -333,7 +333,7 @@ sourceLookup = { path: transcriptPathFor, mtime: transcriptMtimeFor };
 
 /** Valid cached summary for the current source mtime, or null. */
 function readCache(
-  cfg: AtriumConfig,
+  cfg: BifrostConfig,
   sessionId: string,
   sourceMtime: number,
 ): SummaryResult | null {
@@ -355,7 +355,7 @@ function readCache(
 }
 
 export async function summarizeSession(
-  cfg: AtriumConfig,
+  cfg: BifrostConfig,
   sessionId: string,
 ): Promise<SummaryResult> {
   const sourceMtime = sourceLookup.mtime(sessionId);
@@ -373,7 +373,7 @@ export async function summarizeSession(
   const waiting = queued.get(sessionId);
   if (waiting) return waiting.promise;
 
-  // protect Atrium's own runtime from unbounded pile-up
+  // protect Bifrost's own runtime from unbounded pile-up
   if (inFlight.size + order.length >= cfg.summarize.maxQueue) {
     throw new Error("summarizer queue is full — try again shortly");
   }

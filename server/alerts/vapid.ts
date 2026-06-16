@@ -27,6 +27,6 @@ export async function loadVapid(): Promise<Vapid> {
   const keys = webpush.generateVAPIDKeys();
   cached = { subject: SUBJECT, publicKey: keys.publicKey, privateKey: keys.privateKey };
   await writeJsonAtomic(FILE, cached);
-  console.log("[atrium] generated a new VAPID keypair → data/vapid.json");
+  console.log("[bifrost] generated a new VAPID keypair → data/vapid.json");
   return cached;
 }

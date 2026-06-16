@@ -11,7 +11,7 @@ import {
   type ToolCall,
 } from "../derive";
 import { fullArgsForPid } from "../tasknames";
-import type { AtriumConfig } from "../config";
+import type { BifrostConfig } from "../config";
 
 interface LivePidFile {
   pid: number;
@@ -663,11 +663,11 @@ export interface SessionsResult {
 }
 
 export async function collectSessions(
-  cfg: AtriumConfig,
+  cfg: BifrostConfig,
 ): Promise<SessionsResult> {
   const live = await collectLive(cfg.claudeDir);
   const scratch = cfg.summarize.scratchDir;
-  // Atrium's own summarizer sessions never appear in the dashboard.
+  // Bifrost's own summarizer sessions never appear in the dashboard.
   for (const [sid, lp] of live) {
     if (lp.cwd === scratch || lp.cwd.startsWith(scratch + "/")) live.delete(sid);
   }

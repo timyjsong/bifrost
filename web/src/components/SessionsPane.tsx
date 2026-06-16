@@ -6,8 +6,8 @@ import { SectionTitle } from "./ui";
 import { SessionFilterBar } from "./SessionFilterBar";
 import { SESSIONS_VIEWS, DEFAULT_VIEW } from "../views/sessions";
 
-const VIEW_KEY = "atrium.sessions.view";
-const FILTER_KEY = "atrium.sessions.filters";
+const VIEW_KEY = "bifrost.sessions.view";
+const FILTER_KEY = "bifrost.sessions.filters";
 
 function loadFilters(): SessionFilters {
   try {

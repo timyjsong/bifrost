@@ -1,11 +1,11 @@
 /**
  * The extra reads the alert engine needs, beyond what the dashboard collector
- * already gathers. All world-readable; atrium runs as the invoking user. Called once per
+ * already gathers. All world-readable; bifrost runs as the invoking user. Called once per
  * fast tick (no second polling loop) alongside the existing collectors.
  *
  * Unit names are pinned to what actually exists on this box (verified): the ssh
- * unit is `ssh` (not `sshd`), there is no postgres, and `atrium` is omitted —
- * a dead atrium can't send its own down-alert. claude-limits health keys off the
+ * unit is `ssh` (not `sshd`), there is no postgres, and `bifrost` is omitted —
+ * a dead bifrost can't send its own down-alert. claude-limits health keys off the
  * *timer* + the live memory.max, since the .service is a oneshot that idles.
  */
 import { readFile } from "node:fs/promises";

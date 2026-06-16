@@ -1,4 +1,4 @@
-# Atrium
+# Bifrost
 
 A local web dashboard for the `dev` box — **a single pane over everything in motion**: the projects you have, which ones have live Claude Code sessions running, what's in progress, and (later) a way to interact with those sessions from the GUI itself.
 
@@ -14,7 +14,7 @@ A local web dashboard for the `dev` box — **a single pane over everything in m
 
 ## Hard constraint (amended v1.1)
 
-**Atrium must never invoke `claude -p`, headless mode, or the Agent SDK.** From 2026-06-15, programmatic Claude Code usage bills to a separate credit bucket.
+**Bifrost must never invoke `claude -p`, headless mode, or the Agent SDK.** From 2026-06-15, programmatic Claude Code usage bills to a separate credit bucket.
 
 **One sanctioned exception (v1.1, my call 2026-06-11):** the summarize feature dispatches `claude --bg --model haiku` — background sessions are interactive-class (I accepted the residual billing ambiguity; locally corroborated by bg pid files carrying a non-SDK entrypoint). The dispatch happens **only on an explicit button click**, never automatically. Everything else stays read-only: files + `/proc`.
 
@@ -32,7 +32,7 @@ server/               Bun + TypeScript (run natively, no build step)
     system.ts         /proc/{loadavg,meminfo,uptime}, ps, tmux, ss
 web/                  Vite + React 19 + Tailwind v4 + Motion SPA (editorial dark)
 shared/types.ts       one Snapshot type, used by both sides
-deploy/atrium.service systemd unit
+deploy/bifrost.service systemd unit
 ```
 
 - **Fast tick (3s):** sessions + system → snapshot → pushed to browsers over SSE (`/api/events`).
@@ -56,7 +56,7 @@ deploy/atrium.service systemd unit
   card as a named child.
 - **Summaries** (v1.1): `POST /api/sessions/:id/summarize` condenses the transcript server-side,
   dispatches `claude --bg --model haiku`, polls the bg transcript for the result, `claude rm`s
-  the session, and caches to `~/.cache/atrium/summaries` keyed by source mtime. Known limitation:
+  the session, and caches to `~/.cache/bifrost/summaries` keyed by source mtime. Known limitation:
   a *detached* daemon (nohup, reparented to init) is invisible to the child-process check.
 - **Context windows** (v1.3): per live session, switch-aware, resolved in tiers — last
   `/model` stdout log (ANSI-stripped; sticky via a one-time full-transcript scan + tail
@@ -97,14 +97,14 @@ Dev loop for the frontend: `cd web && bun run dev` (proxies `/api` to the runnin
 ## Deploy (24/7)
 
 ```sh
-sudo cp deploy/atrium.service /etc/systemd/system/
+sudo cp deploy/bifrost.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now atrium
+sudo systemctl enable --now bifrost
 ```
 
 Footprint: ~52MB RSS, ~0% CPU idle.
 
-## Config — `atrium.config.json`
+## Config — `bifrost.config.json`
 
 | key | meaning |
 | --- | --- |

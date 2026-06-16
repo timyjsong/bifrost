@@ -306,7 +306,7 @@ describe("nameFromCallIndex", () => {
   });
   test("leaf as subcommand of a compound call matches", () => {
     const idx = index([
-      "cd /home/you/atrium/web && bun run build 2>&1 | tail -5",
+      "cd /home/you/bifrost/web && bun run build 2>&1 | tail -5",
       "Build the frontend bundle",
     ]);
     expect(

@@ -11,9 +11,9 @@ import {
   _resetQueueForTest,
   type SummaryResult,
 } from "./summarize";
-import type { AtriumConfig } from "./config";
+import type { BifrostConfig } from "./config";
 
-const cfg = (over: Partial<AtriumConfig["summarize"]> = {}): AtriumConfig =>
+const cfg = (over: Partial<BifrostConfig["summarize"]> = {}): BifrostConfig =>
   ({
     summarize: {
       claudeBin: "/bin/false",
@@ -21,7 +21,7 @@ const cfg = (over: Partial<AtriumConfig["summarize"]> = {}): AtriumConfig =>
       effort: "low",
       fastStartArgs: [],
       scratchDir: "/tmp/nonexistent-scratch",
-      cacheDir: mkdtempSync(join(tmpdir(), "atrium-cache-")),
+      cacheDir: mkdtempSync(join(tmpdir(), "bifrost-cache-")),
       perJobMb: 250,
       ramShare: 0.33,
       memReservePct: 0.15,
@@ -30,7 +30,7 @@ const cfg = (over: Partial<AtriumConfig["summarize"]> = {}): AtriumConfig =>
       timeoutMs: 5000,
       ...over,
     },
-  }) as AtriumConfig;
+  }) as BifrostConfig;
 
 describe("deriveMaxInFlight scales with the box", () => {
   const c = cfg();
@@ -51,7 +51,7 @@ describe("deriveMaxInFlight scales with the box", () => {
 
 describe("extractConversation", () => {
   test("keeps typed prompts and assistant text, skips wrappers and tool noise", async () => {
-    const path = join(mkdtempSync(join(tmpdir(), "atrium-x-")), "t.jsonl");
+    const path = join(mkdtempSync(join(tmpdir(), "bifrost-x-")), "t.jsonl");
     writeFileSync(
       path,
       [
@@ -86,7 +86,7 @@ describe("extractConversation", () => {
     expect(convo).not.toContain("tool_result");
   });
   test("caps long conversations with an ellipsis marker", async () => {
-    const path = join(mkdtempSync(join(tmpdir(), "atrium-y-")), "t.jsonl");
+    const path = join(mkdtempSync(join(tmpdir(), "bifrost-y-")), "t.jsonl");
     const big = Array.from({ length: 100 }, (_, i) =>
       JSON.stringify({
         type: "user",
@@ -124,7 +124,7 @@ describe("queue mechanics (with injected seams)", () => {
     resolvers.get(id)!({ summary: "s", asOf: 1, cached: false });
 
   test("runs up to the derived limit, queues the rest FIFO, drains on completion", async () => {
-    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "atrium-q-")) });
+    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "bifrost-q-")) });
     const ids = ["a", "b", "c", "d", "e", "f", "g"];
     const promises = ids.map((id) => summarizeSession(c, id));
     await Bun.sleep(1);
@@ -143,7 +143,7 @@ describe("queue mechanics (with injected seams)", () => {
   });
 
   test("dedupes concurrent requests for the same session", async () => {
-    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "atrium-q2-")) });
+    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "bifrost-q2-")) });
     const p1 = summarizeSession(c, "same");
     const p2 = summarizeSession(c, "same");
     await Bun.sleep(1);
@@ -154,7 +154,7 @@ describe("queue mechanics (with injected seams)", () => {
   });
 
   test("holds the queue when memory is below the reserve, resumes when freed", async () => {
-    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "atrium-q3-")) });
+    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "bifrost-q3-")) });
     mem = { totalMb: 3891, availMb: 100 }; // below 15% reserve (~584M)
     const p = summarizeSession(c, "held");
     await Bun.sleep(5);
@@ -169,7 +169,7 @@ describe("queue mechanics (with injected seams)", () => {
 
   test("rejects beyond the queue depth cap", async () => {
     const c = cfg({
-      cacheDir: mkdtempSync(join(tmpdir(), "atrium-q4-")),
+      cacheDir: mkdtempSync(join(tmpdir(), "bifrost-q4-")),
       maxQueue: 6,
     });
     const ps = ["1", "2", "3", "4", "5", "6"].map((id) =>

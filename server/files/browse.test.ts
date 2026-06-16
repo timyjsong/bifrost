@@ -9,7 +9,7 @@ describe("listDir", () => {
   let dir: string;
 
   beforeAll(async () => {
-    dir = realpathSync(await mkdtemp(join(tmpdir(), "atrium-browse-")));
+    dir = realpathSync(await mkdtemp(join(tmpdir(), "bifrost-browse-")));
     await mkdir(join(dir, ".git"));
     await mkdir(join(dir, "node_modules"));
     await mkdir(join(dir, "src"));

@@ -7,7 +7,7 @@ import { taskIdFromLink, taskOwnerFromLink, resolveTaskName } from "./tasknames"
 describe("taskIdFromLink", () => {
   test("extracts the task id from a task output path", () => {
     expect(
-      taskIdFromLink("/tmp/claude-1000/-home-you-atrium/sid/tasks/b6typnoft.output"),
+      taskIdFromLink("/tmp/claude-1000/-home-you-bifrost/sid/tasks/b6typnoft.output"),
     ).toBe("b6typnoft");
   });
   test("non-task fds yield nothing", () => {
@@ -37,7 +37,7 @@ describe("taskOwnerFromLink", () => {
 
 describe("resolveTaskName", () => {
   test("recovers the description via tool_use_id correlation, then caches", async () => {
-    const path = join(mkdtempSync(join(tmpdir(), "atrium-tn-")), "t.jsonl");
+    const path = join(mkdtempSync(join(tmpdir(), "bifrost-tn-")), "t.jsonl");
     writeFileSync(
       path,
       [
@@ -81,7 +81,7 @@ describe("resolveTaskName", () => {
     );
   });
   test("unknown id resolves to undefined", async () => {
-    const path = join(mkdtempSync(join(tmpdir(), "atrium-tn2-")), "t.jsonl");
+    const path = join(mkdtempSync(join(tmpdir(), "bifrost-tn2-")), "t.jsonl");
     writeFileSync(path, "");
     expect(await resolveTaskName("nope99", path)).toBeUndefined();
   });

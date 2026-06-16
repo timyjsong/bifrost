@@ -60,7 +60,7 @@ export async function registerServiceWorker(): Promise<void> {
   try {
     await navigator.serviceWorker.register("/sw.js");
   } catch (err) {
-    console.error("[atrium] service worker registration failed", err);
+    console.error("[bifrost] service worker registration failed", err);
   }
 }
 
@@ -115,7 +115,7 @@ export async function setSessionAlerts(sessionId: string, enabled: boolean): Pro
 
 // ---- policy ---------------------------------------------------------------
 
-const POLICY_CACHE = "atrium.alertPolicy";
+const POLICY_CACHE = "bifrost.alertPolicy";
 
 export function cachedPolicy(): AlertPolicy | null {
   try {

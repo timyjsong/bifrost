@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readdir, stat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProjectInfo, ProjectGit, SessionInfo } from "../../shared/types";
-import type { AtriumConfig } from "../config";
+import type { BifrostConfig } from "../config";
 
 async function run(cmd: string[], timeoutMs = 5000): Promise<string | null> {
   try {
@@ -72,7 +72,7 @@ async function readBlurb(path: string): Promise<string | undefined> {
 }
 
 export async function collectProjects(
-  cfg: AtriumConfig,
+  cfg: BifrostConfig,
   sessions: SessionInfo[],
 ): Promise<ProjectInfo[]> {
   const out: ProjectInfo[] = [];

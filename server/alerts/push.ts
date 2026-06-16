@@ -79,7 +79,7 @@ export async function sendToAll(
           dead.push(s.endpoint);
         } else {
           const msg = err instanceof Error ? err.message : String(err);
-          console.error(`[atrium] push send failed (${code ?? "?"}): ${msg}`);
+          console.error(`[bifrost] push send failed (${code ?? "?"}): ${msg}`);
         }
       }
     }),

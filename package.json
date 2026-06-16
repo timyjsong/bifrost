@@ -1,5 +1,5 @@
 {
-  "name": "atrium",
+  "name": "bifrost",
   "private": true,
   "scripts": {
     "check": "bun test && tsc -p tsconfig.json && cd web && tsc -b",

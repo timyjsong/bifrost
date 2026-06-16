@@ -32,7 +32,7 @@ describe("confinePath (real filesystem)", () => {
   let outside: string; // a sibling dir outside the root — stands in for secrets
 
   beforeAll(async () => {
-    base = await mkdtemp(join(tmpdir(), "atrium-confine-"));
+    base = await mkdtemp(join(tmpdir(), "bifrost-confine-"));
     base = realpathSync(base);
     root = join(base, "project");
     outside = join(base, "outside");

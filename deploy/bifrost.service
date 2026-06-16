@@ -1,5 +1,5 @@
 [Unit]
-Description=Atrium — view-only control tower for the dev box
+Description=Bifrost — view-only control tower for the dev box
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=you
 Group=you
-WorkingDirectory=/home/you/atrium
+WorkingDirectory=/home/you/bifrost
 ExecStart=/home/you/.npm-global/bin/bun server/index.ts
 Restart=always
 RestartSec=5

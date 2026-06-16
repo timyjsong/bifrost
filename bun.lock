@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "atrium",
+      "name": "bifrost",
       "dependencies": {
         "web-push": "^3.6.7",
       },

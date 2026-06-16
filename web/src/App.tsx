@@ -36,7 +36,7 @@ function Rail({
     <aside className="fixed inset-y-0 left-0 z-50 hidden w-48 flex-col border-r border-line-soft bg-bg/60 px-6 py-7 backdrop-blur-sm lg:flex">
       <button onClick={scrollTop} className="select-none text-left" title="back to top">
         <div className="text-[15px] font-semibold tracking-[0.32em] text-ink">
-          ATRIUM
+          BIFROST
         </div>
         <div className="mt-2 h-px w-7 bg-gold/70" />
         <div className="mt-2 text-[11px] tracking-wide text-ink-mute">
@@ -179,7 +179,7 @@ export default function App() {
 
   // the tab itself is a status surface
   useEffect(() => {
-    document.title = needsYou > 0 ? `(${needsYou}) Atrium` : "Atrium";
+    document.title = needsYou > 0 ? `(${needsYou}) Bifrost` : "Bifrost";
   }, [needsYou]);
 
   // Mobile carousel: the horizontal scroll-snap track drives the active pane;
@@ -220,7 +220,7 @@ export default function App() {
   if (!snap || !snap.generatedAt) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-3">
-        <div className="text-[13px] tracking-[0.32em] text-ink-mute">ATRIUM</div>
+        <div className="text-[13px] tracking-[0.32em] text-ink-mute">BIFROST</div>
         <div className="h-px w-7 bg-gold/60" />
         <div className="pulse-dot text-[11px] text-ink-mute/60">waking…</div>
       </div>
@@ -297,7 +297,7 @@ export default function App() {
             onClick={scrollTop}
             className="text-[14px] font-semibold tracking-[0.24em] text-ink lg:hidden"
           >
-            ATRIUM
+            BIFROST
           </button>
           <div className="flex shrink-0 items-center gap-2 whitespace-nowrap text-[12.5px] text-ink-dim">
             <Dot tone={liveCount > 0 ? "gold" : "mute"} pulse={liveCount > 0} />
@@ -396,7 +396,7 @@ export default function App() {
         </div>
 
         <footer className="mt-16 hidden items-baseline justify-between border-t border-line-soft pt-4 text-[11px] text-ink-mute lg:flex">
-          <span>view-only by design — atrium watches, it doesn't poke</span>
+          <span>view-only by design — bifrost watches, it doesn't poke</span>
           <span className="font-mono text-[10.5px] text-ink-mute/60">
             {sys.hostname}
           </span>

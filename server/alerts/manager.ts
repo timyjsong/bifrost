@@ -61,10 +61,10 @@ export async function evaluateAlerts(
     sendToAll({ title: a.title, body: a.body, tag: a.tag, url: "/" })
       .then((r) => {
         if (r.sent || r.pruned) {
-          console.log(`[atrium] alert ${a.id} → ${r.sent} sent, ${r.pruned} pruned`);
+          console.log(`[bifrost] alert ${a.id} → ${r.sent} sent, ${r.pruned} pruned`);
         }
       })
-      .catch((e) => console.error(`[atrium] alert ${a.id} send failed:`, e));
+      .catch((e) => console.error(`[bifrost] alert ${a.id} send failed:`, e));
   }
 }
 
@@ -101,9 +101,9 @@ export async function handleAlertRequest(req: Request, url: URL): Promise<Respon
 
   if (p === "/api/push/test" && req.method === "POST") {
     const r = await sendToAll({
-      title: "Atrium",
+      title: "Bifrost",
       body: "Push is wired up — you'll get alerts here.",
-      tag: "atrium-test",
+      tag: "bifrost-test",
       url: "/",
     });
     return Response.json({ ...r, subscriptions: await subscriptionCount() });

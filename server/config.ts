@@ -8,7 +8,7 @@ export interface RealmConfig {
   path: string;
 }
 
-export interface AtriumConfig {
+export interface BifrostConfig {
   bind: { host: string; port: number };
   realms: RealmConfig[];
   claudeDir: string;
@@ -38,10 +38,10 @@ export function expandHome(p: string): string {
   return p;
 }
 
-export function loadConfig(): AtriumConfig {
+export function loadConfig(): BifrostConfig {
   const path =
-    process.env.ATRIUM_CONFIG ?? join(repoRoot, "atrium.config.json");
-  const raw = JSON.parse(readFileSync(path, "utf8")) as AtriumConfig;
+    process.env.BIFROST_CONFIG ?? join(repoRoot, "bifrost.config.json");
+  const raw = JSON.parse(readFileSync(path, "utf8")) as BifrostConfig;
   raw.claudeDir = expandHome(raw.claudeDir);
   raw.realms = raw.realms.map((r) => ({ ...r, path: expandHome(r.path) }));
   raw.summarize.scratchDir = expandHome(raw.summarize.scratchDir);
