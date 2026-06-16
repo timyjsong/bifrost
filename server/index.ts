@@ -28,6 +28,10 @@ import { transcriptPathFor } from "./collectors/sessions";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import { handleFilesRequest } from "./files/handler";
 import { mutedSessions } from "./alerts/sessions";
+import { decide } from "./auth/guard";
+import { verifyToken, mintToken } from "./auth/tokens";
+import { consumeEnrollCode } from "./auth/enroll";
+import { isThrottled, recordFailure } from "./auth/throttle";
 import type { Snapshot, ProjectInfo } from "../shared/types";
 
 const cfg = loadConfig();
@@ -288,47 +292,160 @@ async function serveStatic(pathname: string): Promise<Response> {
   });
 }
 
+// ---- security headers + CORS ----------------------------------------------
+
+// Strict CSP. `connect-src 'self'` is the load-bearing control: even if an XSS
+// ever slipped in, it could not exfiltrate the device token to another origin.
+// `script-src 'self'` matches the single external module bundle (no inline JS);
+// style needs 'unsafe-inline' for the inline <style> + runtime-injected styles.
+const CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "manifest-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'none'",
+].join("; ");
+
+function secured(res: Response, origin: string | null, proto: string | null): Response {
+  const h = res.headers;
+  h.set("X-Content-Type-Options", "nosniff");
+  h.set("Referrer-Policy", "no-referrer");
+  h.set("Content-Security-Policy", CSP);
+  if (proto === "https") h.set("Strict-Transport-Security", "max-age=31536000");
+  // CORS is defensive only — the PWA calls its own origin (relative paths). An
+  // allowlisted Origin gets ACAO so the browser may read the response; anything
+  // else gets none and is blocked.
+  if (origin && cfg.auth.origins.includes(origin)) {
+    h.set("Access-Control-Allow-Origin", origin);
+    h.set("Vary", "Origin");
+  }
+  return res;
+}
+
+function preflight(origin: string | null): Response {
+  const headers = new Headers({
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "X-Bifrost-Token, Content-Type",
+    "Access-Control-Max-Age": "600",
+    Vary: "Origin",
+  });
+  if (origin && cfg.auth.origins.includes(origin)) {
+    headers.set("Access-Control-Allow-Origin", origin);
+  }
+  return new Response(null, { status: 204, headers });
+}
+
+// ---- routing (reached only AFTER the auth gate admits the request) --------
+
+async function route(req: Request, url: URL, now: number): Promise<Response> {
+  if (url.pathname === "/api/enroll" && req.method === "POST") {
+    const body = (await req.json().catch(() => ({}))) as {
+      code?: unknown;
+      label?: unknown;
+    };
+    const code = typeof body.code === "string" ? body.code : "";
+    const label = typeof body.label === "string" ? body.label : "device";
+    if (!(await consumeEnrollCode(code, now))) {
+      return Response.json({ error: "invalid or expired code" }, { status: 400 });
+    }
+    const token = await mintToken(label, now);
+    return Response.json({ token });
+  }
+  if (url.pathname === "/api/state") {
+    return Response.json(snapshot);
+  }
+  const sumMatch = url.pathname.match(
+    /^\/api\/sessions\/([0-9a-f-]{36})\/summarize$/,
+  );
+  if (sumMatch && req.method === "POST") {
+    try {
+      const result = await summarizeSession(cfg, sumMatch[1]);
+      return Response.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message === "unknown session" ? 404 : 500;
+      return Response.json({ error: message }, { status });
+    }
+  }
+  if (url.pathname.startsWith("/api/push/") || url.pathname.startsWith("/api/alerts/")) {
+    const res = await handleAlertRequest(req, url);
+    if (res) return res;
+  }
+  if (url.pathname === "/api/files") {
+    // Roots are the live project dirs — you can only browse INTO a project the
+    // dashboard already shows, never the realm above it or anything outside.
+    const res = await handleFilesRequest(url, projects.map((p) => p.path));
+    if (res) return res;
+  }
+  if (url.pathname === "/api/events") {
+    return sseResponse();
+  }
+  if (url.pathname === "/api/health") {
+    return Response.json({ ok: true, generatedAt: snapshot.generatedAt });
+  }
+  return serveStatic(url.pathname);
+}
+
 // ---- server ---------------------------------------------------------------
 
 const server = Bun.serve({
   hostname: cfg.bind.host,
   port: cfg.bind.port,
   idleTimeout: 0, // SSE connections stay open
-  async fetch(req) {
+  async fetch(req, srv) {
     const url = new URL(req.url);
-    if (url.pathname === "/api/state") {
-      return Response.json(snapshot);
+    const host = req.headers.get("host");
+    const origin = req.headers.get("origin");
+    const proto = req.headers.get("x-forwarded-proto"); // caddy sets this on HTTPS
+    // Throttle key: caddy (HTTPS route) sets a trustworthy X-Forwarded-For; on the
+    // raw :4444 route XFF is spoofable, so use the real socket address there.
+    const ip =
+      proto === "https"
+        ? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "caddy"
+        : srv.requestIP(req)?.address ?? "unknown";
+    const now = Date.now();
+
+    // CORS preflight is answered before auth — the browser attaches no token to a
+    // preflight, and refusing it (no ACAO for a bad origin) is what blocks CSRF.
+    if (req.method === "OPTIONS") return preflight(origin);
+
+    // Brute-force throttle on the auth surface.
+    if (isThrottled(ip, now)) {
+      return secured(
+        Response.json({ error: "too many attempts" }, { status: 429 }),
+        origin,
+        proto,
+      );
     }
-    const sumMatch = url.pathname.match(
-      /^\/api\/sessions\/([0-9a-f-]{36})\/summarize$/,
-    );
-    if (sumMatch && req.method === "POST") {
-      try {
-        const result = await summarizeSession(cfg, sumMatch[1]);
-        return Response.json(result);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const status = message === "unknown session" ? 404 : 500;
-        return Response.json({ error: message }, { status });
-      }
+
+    // The fail-closed gate — EVERY request passes here before any handler.
+    // Default deny; the guard's tiny allowlist (static shell, /api/health,
+    // /api/enroll) is the only way through without a valid device token.
+    const tokenValid = await verifyToken(req.headers.get("x-bifrost-token"));
+    const verdict = decide({
+      pathname: url.pathname,
+      host,
+      origin,
+      tokenValid,
+      allowedHosts: cfg.auth.hosts,
+      allowedOrigins: cfg.auth.origins,
+    });
+    if (!verdict.allow) {
+      if (verdict.status === 401) recordFailure(ip, now);
+      return secured(
+        Response.json({ error: verdict.reason }, { status: verdict.status }),
+        origin,
+        proto,
+      );
     }
-    if (url.pathname.startsWith("/api/push/") || url.pathname.startsWith("/api/alerts/")) {
-      const res = await handleAlertRequest(req, url);
-      if (res) return res;
-    }
-    if (url.pathname === "/api/files") {
-      // Roots are the live project dirs — you can only browse INTO a project the
-      // dashboard already shows, never the realm above it or anything outside.
-      const res = await handleFilesRequest(url, projects.map((p) => p.path));
-      if (res) return res;
-    }
-    if (url.pathname === "/api/events") {
-      return sseResponse();
-    }
-    if (url.pathname === "/api/health") {
-      return Response.json({ ok: true, generatedAt: snapshot.generatedAt });
-    }
-    return serveStatic(url.pathname);
+
+    return secured(await route(req, url, now), origin, proto);
   },
 });
 

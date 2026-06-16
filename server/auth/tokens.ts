@@ -4,11 +4,18 @@
  * non-served data dir (0600, the same store as the VAPID secret) and checks a
  * presented token against it in constant time. Opaque + server-side means
  * revocation is just removing an entry — no signing, no crypto to get wrong.
+ *
+ * The in-memory cache is mtime-invalidated (the `claudeJson` pattern), so a token
+ * minted or revoked by the box CLI — a different process — is honored by the
+ * running server on its very next request, no restart needed.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { readJson, writeJsonAtomic } from "../alerts/store";
+import { stat } from "node:fs/promises";
+import { join } from "node:path";
+import { dataDir, readJson, writeJsonAtomic } from "../alerts/store";
 
 const FILE = "auth-tokens.json";
+const PATH = join(dataDir, FILE);
 
 export interface DeviceToken {
   token: string; // base64url, 32 random bytes (256-bit)
@@ -16,17 +23,27 @@ export interface DeviceToken {
   createdAt: number;
 }
 
-let cache: DeviceToken[] | null = null;
+let cache: { mtimeMs: number; list: DeviceToken[] } | null = null;
+
+async function fileMtime(): Promise<number> {
+  try {
+    return (await stat(PATH)).mtimeMs;
+  } catch {
+    return 0; // missing file → mtime 0, distinct from any real write
+  }
+}
 
 async function load(): Promise<DeviceToken[]> {
-  if (cache) return cache;
-  cache = await readJson<DeviceToken[]>(FILE, []);
-  return cache;
+  const mtimeMs = await fileMtime();
+  if (cache && cache.mtimeMs === mtimeMs) return cache.list;
+  const list = await readJson<DeviceToken[]>(FILE, []);
+  cache = { mtimeMs, list };
+  return list;
 }
 
 async function save(list: DeviceToken[]): Promise<void> {
-  cache = list;
   await writeJsonAtomic(FILE, list);
+  cache = { mtimeMs: await fileMtime(), list };
 }
 
 export function newToken(): string {

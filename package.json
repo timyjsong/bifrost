@@ -3,14 +3,18 @@
   "private": true,
   "scripts": {
     "check": "bun test && tsc -p tsconfig.json && cd web && tsc -b",
-    "test": "bun test"
+    "test": "bun test",
+    "enroll": "bun server/auth/cli.ts enroll",
+    "auth": "bun server/auth/cli.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.4",
+    "@types/qrcode": "^1.5.6",
     "@types/web-push": "^3.6.4",
     "typescript": "^5.9.0"
   },
   "dependencies": {
+    "qrcode": "^1.5.4",
     "web-push": "^3.6.7"
   }
 }
