@@ -8,6 +8,8 @@ import { SessionsPane } from "./components/SessionsPane";
 import { ProjectsPane } from "./components/ProjectsPane";
 import { SystemPane } from "./components/SystemPane";
 import { AlertsPane } from "./components/AlertsPane";
+import { Enroll } from "./components/Enroll";
+import { getToken, AUTH_LOST_EVENT } from "./lib/api";
 
 function scrollTop() {
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -168,7 +170,7 @@ function MobileTabs({
   );
 }
 
-export default function App() {
+function Dashboard() {
   const { snap, connected } = useSnapshot();
   const now = useNow();
 
@@ -404,4 +406,17 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+/** Auth gate: the dashboard mounts only once a device token exists. A 401 from
+ *  any API call fires AUTH_LOST_EVENT, dropping back here to re-enroll. */
+export default function App() {
+  const [authed, setAuthed] = useState(() => !!getToken());
+  useEffect(() => {
+    const onLost = () => setAuthed(false);
+    window.addEventListener(AUTH_LOST_EVENT, onLost);
+    return () => window.removeEventListener(AUTH_LOST_EVENT, onLost);
+  }, []);
+  if (!authed) return <Enroll onEnrolled={() => setAuthed(true)} />;
+  return <Dashboard />;
 }

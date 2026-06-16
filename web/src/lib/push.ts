@@ -5,6 +5,7 @@
  * (navigator/Notification/PushManager) and only runs in the page.
  */
 import type { AlertPolicy } from "../../../shared/alerts";
+import { apiFetch } from "./api";
 
 export type PushStatus =
   | "unsupported" // no SW/Push and not an installable iOS case
@@ -75,12 +76,12 @@ export async function enableAlerts(): Promise<{ ok: boolean; reason?: string }> 
   const permission = await Notification.requestPermission();
   if (permission !== "granted") return { ok: false, reason: permission };
   const reg = await navigator.serviceWorker.ready;
-  const { publicKey } = await fetch("/api/push/vapid").then((r) => r.json());
+  const { publicKey } = await apiFetch("/api/push/vapid").then((r) => r.json());
   const sub = await reg.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: urlBase64ToUint8Array(publicKey),
   });
-  await fetch("/api/push/subscribe", {
+  await apiFetch("/api/push/subscribe", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(sub),
@@ -91,7 +92,7 @@ export async function enableAlerts(): Promise<{ ok: boolean; reason?: string }> 
 export async function disableAlerts(): Promise<void> {
   const sub = await currentSubscription();
   if (!sub) return;
-  await fetch("/api/push/unsubscribe", {
+  await apiFetch("/api/push/unsubscribe", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ endpoint: sub.endpoint }),
@@ -100,13 +101,13 @@ export async function disableAlerts(): Promise<void> {
 }
 
 export async function sendTestPush(): Promise<{ sent: number; pruned: number }> {
-  return fetch("/api/push/test", { method: "POST" }).then((r) => r.json());
+  return apiFetch("/api/push/test", { method: "POST" }).then((r) => r.json());
 }
 
 /** Per-session mute — the per-card toggle. Server keeps the canonical set; the
  *  next snapshot reflects it via session.alertsEnabled. */
 export async function setSessionAlerts(sessionId: string, enabled: boolean): Promise<void> {
-  await fetch("/api/alerts/session", {
+  await apiFetch("/api/alerts/session", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ sessionId, enabled }),
@@ -127,7 +128,7 @@ export function cachedPolicy(): AlertPolicy | null {
 }
 
 export async function fetchPolicy(): Promise<AlertPolicy> {
-  const policy = await fetch("/api/alerts/policy")
+  const policy = await apiFetch("/api/alerts/policy")
     .then((r) => r.json())
     .then((d) => d.policy as AlertPolicy);
   try {
@@ -144,7 +145,7 @@ export async function savePolicy(policy: AlertPolicy): Promise<AlertPolicy> {
   } catch {
     /* ignore */
   }
-  return fetch("/api/alerts/policy", {
+  return apiFetch("/api/alerts/policy", {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ policy }),

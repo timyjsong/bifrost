@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Snapshot } from "../../../shared/types";
+import { apiFetch, sseStream } from "./api";
 
 export interface SnapshotState {
   snap: Snapshot | null;
@@ -28,27 +29,44 @@ export function useSnapshot(): SnapshotState {
       return false;
     };
 
-    const es = new EventSource("/api/events");
-    es.addEventListener("snapshot", (e) => {
-      lastEvent.current = Date.now();
-      setConnected(true);
-      const next: Snapshot = JSON.parse((e as MessageEvent).data);
-      if (applyBundle(next)) return;
-      setSnap(next);
-    });
-    es.onerror = () => setConnected(false);
+    const ac = new AbortController();
+    let stopped = false;
 
     const pollState = async () => {
       try {
-        const r = await fetch("/api/state");
+        const r = await apiFetch("/api/state");
         if (!r.ok) return;
         const next: Snapshot = await r.json();
         if (applyBundle(next)) return;
         setSnap(next);
       } catch {
-        // server unreachable; EventSource keeps retrying
+        // server unreachable, or auth lost (the enroll screen takes over)
       }
     };
+
+    // The live stream, over fetch (so the token header rides along). EventSource
+    // would auto-reconnect; here we own the retry loop — reconnect after a beat
+    // whenever the stream ends or errors, until the effect unmounts.
+    const run = async () => {
+      while (!stopped) {
+        try {
+          for await (const frame of sseStream("/api/events", ac.signal)) {
+            if (frame.event !== "snapshot") continue;
+            lastEvent.current = Date.now();
+            setConnected(true);
+            const next: Snapshot = JSON.parse(frame.data);
+            if (applyBundle(next)) return; // reloading — stop the loop
+            setSnap(next);
+          }
+        } catch (err) {
+          if (stopped || ac.signal.aborted) return;
+          if ((err as Error).message === "unauthenticated") return; // enroll takes over
+        }
+        setConnected(false);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    };
+    void run();
 
     // Belt and braces: if the stream goes quiet, poll once and flag it.
     const watchdog = setInterval(() => {
@@ -65,7 +83,8 @@ export function useSnapshot(): SnapshotState {
     document.addEventListener("visibilitychange", onVisible);
 
     return () => {
-      es.close();
+      stopped = true;
+      ac.abort();
       clearInterval(watchdog);
       document.removeEventListener("visibilitychange", onVisible);
     };

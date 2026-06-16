@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import Markdown from "react-markdown";
 import { relTime } from "../lib/format";
+import { apiFetch } from "../lib/api";
 
 type Phase =
   | { kind: "idle" }
@@ -40,7 +41,7 @@ export function SummaryBlock({
     setPhase({ kind: "loading" });
     setOpen(true);
     try {
-      const r = await fetch(`/api/sessions/${sessionId}/summarize`, {
+      const r = await apiFetch(`/api/sessions/${sessionId}/summarize`, {
         method: "POST",
       });
       const d = await r.json();

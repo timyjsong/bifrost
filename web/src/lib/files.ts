@@ -1,4 +1,5 @@
 import type { DirListing } from "../../../shared/types";
+import { apiFetch } from "./api";
 
 /**
  * Fetch a directory listing from the confined `/api/files` endpoint. Throws on a
@@ -11,7 +12,7 @@ export async function fetchDir(
 ): Promise<DirListing> {
   const qs = new URLSearchParams({ path });
   if (showHidden) qs.set("all", "1");
-  const res = await fetch(`/api/files?${qs}`);
+  const res = await apiFetch(`/api/files?${qs}`);
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
     throw new Error(body?.error ?? `HTTP ${res.status}`);
