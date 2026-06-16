@@ -4,6 +4,8 @@ import {
   leafChildren,
   cleanCommand,
   deriveState,
+  settleStates,
+  attributeBackground,
   deriveVia,
   nameFromCallIndex,
   canonCommand,
@@ -467,5 +469,129 @@ describe("deriveState", () => {
         0,
       ),
     ).toBeUndefined();
+  });
+});
+
+describe("settleStates (post-absorption state)", () => {
+  const sigs = (id: string, over = {}) =>
+    new Map([[id, sig({ lastEntry: "assistant_done", ...over })]]);
+
+  test("turn over + a re-attributed agent (childProcs>0) is paused, NOT awaiting", () => {
+    // The bug: derive state off the post-absorption count, or a session blocked
+    // on a fan-out agent falsely reads needs-you.
+    const s = liveSession({ sessionId: "a", pid: 100, childProcs: 1 });
+    settleStates([s], sigs("a"));
+    expect(s.state).toBe("paused");
+  });
+
+  test("turn over + genuinely nothing running is awaiting", () => {
+    const s = liveSession({ sessionId: "a", pid: 100, childProcs: 0 });
+    settleStates([s], sigs("a"));
+    expect(s.state).toBe("awaiting");
+  });
+
+  test("headless sessions get no state; a pidless session is skipped", () => {
+    const h = liveSession({ sessionId: "h", pid: 100, headless: true, childProcs: 0 });
+    const nopid = liveSession({ sessionId: "n", state: "working" });
+    settleStates([h, nopid], new Map([
+      ["h", sig({ lastEntry: "assistant_done" })],
+      ["n", sig({ lastEntry: "assistant_done" })],
+    ]));
+    expect(h.state).toBeUndefined();
+    expect(nopid.state).toBe("working"); // untouched — no pid, no signal match path
+  });
+
+  test("clears nowDoing once a session is no longer working", () => {
+    const s = liveSession({ sessionId: "a", pid: 100, childProcs: 0, nowDoing: "stale" });
+    settleStates([s], sigs("a"));
+    expect(s.state).toBe("awaiting");
+    expect(s.nowDoing).toBeUndefined();
+  });
+});
+
+describe("attributeBackground (capture every subprocess shape)", () => {
+  // owner A is a live interactive session (pid 100); helpers below build the
+  // ps-tree descendant map and the fd-link owner map the caller pre-resolves.
+  const A = { sessionId: "A", pid: 100, live: true, headless: false };
+  const tree = (entries: Record<number, number[]>) =>
+    new Map(Object.entries(entries).map(([pid, kids]) => [Number(pid), new Set(kids)]));
+
+  test("foreground tool child (ps-tree) is kept, nothing absorbed", () => {
+    const { descByPid, absorbed } = attributeBackground([A], tree({ 100: [200] }), new Map());
+    expect([...descByPid.get(100)!]).toEqual([200]);
+    expect(absorbed.size).toBe(0);
+  });
+
+  test("ORPHANED background shell (not in tree) is recovered via the fd-link", () => {
+    // 300 reparented to init — absent from A's ps-tree — but its stdout fd still
+    // carries A's task-dir UUID (here == sessionId, the --resume case).
+    const { descByPid } = attributeBackground([A], tree({ 100: [] }), new Map([[300, "A"]]));
+    expect(descByPid.get(100)!.has(300)).toBe(true);
+  });
+
+  test("orphan recovered when the task-dir UUID DIFFERS from the sessionId (post-/clear)", () => {
+    // A's own ps-tree child 200 writes to task dir "RT" — so we learn RT->A even
+    // though A's sessionId is "A". An orphan 300 also on "RT" is then attributed.
+    const { descByPid } = attributeBackground(
+      [A], tree({ 100: [200], 200: [] }), new Map([[200, "RT"], [300, "RT"]]),
+    );
+    expect(descByPid.get(100)!.has(300)).toBe(true); // the orphan, by learned UUID
+    expect(descByPid.get(100)!.has(200)).toBe(true); // the tree child, still there
+  });
+
+  test("a proc both in the tree AND fd-linked is counted once (set dedup)", () => {
+    const { descByPid } = attributeBackground([A], tree({ 100: [300] }), new Map([[300, "A"]]));
+    expect([...descByPid.get(100)!]).toEqual([300]);
+  });
+
+  test("spawned agent that IS a ps-tree descendant is absorbed (no double-list)", () => {
+    // the eval `claude -p` case: a headless session living inside A's tree —
+    // shown on A's card, so hidden from the headless group.
+    const agent = { sessionId: "B", pid: 500, live: true, headless: true };
+    const { descByPid, absorbed } = attributeBackground([A, agent], tree({ 100: [500], 500: [] }), new Map());
+    expect(descByPid.get(100)!.has(500)).toBe(true);
+    expect([...absorbed]).toEqual(["B"]);
+  });
+
+  test("spawned agent attributed ONLY by fd-link (orphaned) is also absorbed", () => {
+    const agent = { sessionId: "B", pid: 500, live: true, headless: true };
+    const { descByPid, absorbed } = attributeBackground(
+      [A, agent], tree({ 100: [], 500: [] }), new Map([[500, "A"]]),
+    );
+    expect(descByPid.get(100)!.has(500)).toBe(true);
+    expect([...absorbed]).toEqual(["B"]);
+  });
+
+  test("a standalone headless run (not under any session) is NOT absorbed", () => {
+    const standalone = { sessionId: "B", pid: 500, live: true, headless: true };
+    const { absorbed } = attributeBackground([A, standalone], tree({ 100: [], 500: [] }), new Map());
+    expect(absorbed.size).toBe(0);
+  });
+
+  test("fd-link to a dead / non-interactive owner attributes nothing", () => {
+    const { descByPid } = attributeBackground([A], tree({ 100: [] }), new Map([[300, "GHOST"]]));
+    expect(descByPid.get(100)!.size).toBe(0);
+  });
+
+  test("fd-link is never routed to a headless owner (only interactive cards)", () => {
+    const headlessOwner = { sessionId: "H", pid: 700, live: true, headless: true };
+    const { descByPid } = attributeBackground(
+      [A, headlessOwner], tree({ 100: [], 700: [] }), new Map([[800, "H"]]),
+    );
+    expect(descByPid.get(700)?.has(800)).toBeFalsy(); // H is headless — not an owner
+  });
+
+  test("an interactive owner is never absorbed, even if nested oddly", () => {
+    const B = { sessionId: "B", pid: 500, live: true, headless: false }; // interactive
+    const { absorbed } = attributeBackground([A, B], tree({ 100: [500], 500: [] }), new Map());
+    expect(absorbed.size).toBe(0); // B is interactive — stays its own card
+  });
+
+  test("a multi-proc orphaned task: every linked pid joins the owner's set", () => {
+    // wrapper exited; node + two agents reparented, all still fd-linked to A.
+    const { descByPid } = attributeBackground(
+      [A], tree({ 100: [] }), new Map([[610, "A"], [620, "A"], [630, "A"]]),
+    );
+    expect([...descByPid.get(100)!].sort()).toEqual([610, 620, 630]);
   });
 });

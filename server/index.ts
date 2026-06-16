@@ -5,10 +5,10 @@ import { collectSessions } from "./collectors/sessions";
 import {
   descendantsOf,
   leafChildren,
-  cleanCommand,
-  deriveState,
   deriveVia,
   nameFromCallIndex,
+  settleStates,
+  attributeBackground,
 } from "./derive";
 import { collectProjects } from "./collectors/projects";
 import { collectSystem } from "./collectors/system";
@@ -63,26 +63,49 @@ async function fastTick() {
       collectSessions(cfg),
       collectSystem(),
     ]);
-    const descByPid = new Map<number, Set<number>>();
+    // ps-tree descendants per live session
+    const descByPidTree = new Map<number, Set<number>>();
     for (const s of sessRes.sessions) {
       if (s.live && s.pid) {
-        descByPid.set(s.pid, descendantsOf(s.pid, sysRes.pidTree));
+        descByPidTree.set(s.pid, descendantsOf(s.pid, sysRes.pidTree));
       }
     }
-    const ppidOf = new Map(sysRes.pidTree);
-    const muted = await mutedSessions();
+    // A live claude whose pid sits inside another live session's process tree is
+    // spawned automation (claude-in-claude), whatever its entrypoint claims —
+    // fold it in with the headless runs. Marked before attribution so it can't
+    // be treated as an owner of its own siblings.
     for (const s of sessRes.sessions) {
-      const sig = sessRes.signals.get(s.sessionId);
-      if (!sig || !s.pid) continue;
-      // A live claude whose pid sits inside another live session's process
-      // tree is spawned automation (claude-in-claude), whatever its
-      // entrypoint claims — fold it in with the headless runs.
-      for (const [pid, desc] of descByPid) {
+      if (!s.live || !s.pid) continue;
+      for (const [pid, desc] of descByPidTree) {
         if (pid !== s.pid && desc.has(s.pid)) {
           s.headless = true;
           break;
         }
       }
+    }
+    // Background work (run-in-background shells, fanned-out agents) reparents to
+    // init the moment its launcher exits — gone from the process tree, but its
+    // stdout fd still points at the owner's tasks/<uuid>/…/<id>.output. Read each
+    // proc's task-dir UUID off that fd; attributeBackground maps it to the owning
+    // session (learning the UUID from each session's own tree, since it can
+    // differ from the sessionId) so orphans are captured and agents not double-
+    // listed.
+    const fdUuidByPid = new Map<number, string>();
+    for (const p of sysRes.allProcs) {
+      const link = fdLink(p.pid, 1);
+      const owner = link ? taskOwnerFromLink(link) : undefined;
+      if (owner) fdUuidByPid.set(p.pid, owner.ownerSessionId);
+    }
+    const { descByPid, absorbed } = attributeBackground(
+      sessRes.sessions,
+      descByPidTree,
+      fdUuidByPid,
+    );
+    const ppidOf = new Map(sysRes.pidTree);
+    const muted = await mutedSessions();
+    for (const s of sessRes.sessions) {
+      const sig = sessRes.signals.get(s.sessionId);
+      if (!sig || !s.pid) continue;
       const descendants = descByPid.get(s.pid) ?? new Set();
       s.childProcs = descendants.size;
       s.children = leafChildren(descendants, sysRes.pidTree, sysRes.allProcs);
@@ -117,46 +140,15 @@ async function fastTick() {
         s.tmuxAttached = via.tmuxAttached;
         s.overSsh = via.overSsh;
       }
-      s.state = s.headless
-        ? undefined
-        : deriveState(s, sig, descendants.size);
       s.alertsEnabled = !muted.has(s.sessionId); // per-card mute (default on)
-      if (s.state !== "working") s.nowDoing = undefined; // snippet only meaningful mid-work
+      // NB: s.state is derived LATER — after attribution above — so a session
+      // waiting on a re-attributed agent isn't misread as "awaiting".
     }
-    // A live headless claude whose stdout feeds another live session's task
-    // output is that session's background agent — show it as a child on the
-    // owner's card, not as a session row of its own.
-    const procByPid = new Map(sysRes.allProcs.map((p) => [p.pid, p]));
-    const byId = new Map(sessRes.sessions.map((s) => [s.sessionId, s]));
-    const absorbed = new Set<string>();
-    for (const s of sessRes.sessions) {
-      if (!s.live || !s.headless || !s.pid) continue;
-      const link = fdLink(s.pid, 1);
-      const owner = link ? taskOwnerFromLink(link) : undefined;
-      const parent = owner ? byId.get(owner.ownerSessionId) : undefined;
-      if (!owner || !parent?.live || parent.sessionId === s.sessionId) continue;
-      absorbed.add(s.sessionId);
-      // already visible as a ps-tree child of the owner — don't double-list
-      if (parent.pid && descByPid.get(parent.pid)?.has(s.pid)) continue;
-      const proc = procByPid.get(s.pid);
-      parent.children = [
-        ...(parent.children ?? []),
-        {
-          pid: s.pid,
-          etime: proc?.etime ?? "",
-          rssKb: proc?.rssKb ?? 0,
-          cpu: proc?.cpu ?? 0,
-          command: cleanCommand(fullArgsForPid(s.pid) ?? "claude (agent)"),
-          // the agent's own first prompt is the best fallback name
-          name:
-            (await resolveTaskName(
-              owner.taskId,
-              transcriptPathFor(parent.sessionId),
-            )) ?? s.title,
-        },
-      ];
-      parent.childProcs = (parent.childProcs ?? 0) + 1;
-    }
+    // Derive live state ONLY now — s.childProcs finally reflects re-attributed
+    // fan-out agents, so a session blocked on a background agent reads "paused",
+    // not a false "awaiting"/needs-you. Same truth the alert layer's
+    // genuinelyDone already used (it checks children); the card's state agrees.
+    settleStates(sessRes.sessions, sessRes.signals);
     const sessions = sessRes.sessions.filter(
       (s) => !absorbed.has(s.sessionId),
     );

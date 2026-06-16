@@ -322,3 +322,89 @@ export function deriveState(
   }
   return "working";
 }
+
+/**
+ * Assign each session its activity state, in place, from its FINAL child count
+ * (`s.childProcs`). Run this only AFTER fan-out agents have been absorbed onto
+ * their owner — `s.childProcs` then includes re-attributed agents, so a session
+ * blocked on a background agent reads "paused", never a false "awaiting". Derive
+ * earlier, off the raw ps-tree count, and a swarm's owner looks idle and pings
+ * you. nowDoing is cleared off-work since the snippet is only meaningful mid-run.
+ */
+export function settleStates(
+  sessions: SessionInfo[],
+  signals: Map<string, SessionSignals>,
+): void {
+  for (const s of sessions) {
+    const sig = signals.get(s.sessionId);
+    if (!sig || !s.pid) continue;
+    s.state = s.headless ? undefined : deriveState(s, sig, s.childProcs ?? 0);
+    if (s.state !== "working") s.nowDoing = undefined;
+  }
+}
+
+/**
+ * Attribute a session's background work, by BOTH the process tree and the
+ * `tasks/<uuid>/…/<id>.output` fd-link — because work spawned in the background
+ * detaches from the tree the moment its launcher exits (reparented to init), yet
+ * its stdout still points at the owning session's task-output file. The ps-tree
+ * alone misses every such orphan; the fd-link recovers it.
+ *
+ * The fd path carries the runtime task-dir UUID, which is NOT always the session
+ * transcript id (a bare launch that later `/clear`s keeps its original task dir).
+ * So rather than trust uuid == sessionId, we LEARN each interactive session's
+ * task-dir UUID from its own ps-tree descendants (they write to it), then map
+ * every fd-linked proc — orphans included — to its owner by that UUID. The
+ * sessionId is also seeded as a UUID, covering `--resume <id>` where they match.
+ *
+ * Returns an augmented descendant set per session pid, plus the live headless
+ * sessions thereby shown as some interactive session's child (absorbed agents),
+ * which must be hidden from the standalone headless group — also what stops an
+ * agent being listed twice (once on the card, once in the group).
+ *
+ * Pure: fd targets are pre-resolved to task-dir UUIDs by the caller, so this
+ * needs no /proc access and every subprocess shape is unit-testable.
+ */
+export function attributeBackground(
+  sessions: Pick<SessionInfo, "sessionId" | "pid" | "live" | "headless">[],
+  psTreeDescByPid: Map<number, Set<number>>,
+  fdUuidByPid: Map<number, string>, // child pid -> task-dir UUID (from its tasks/output fd)
+): { descByPid: Map<number, Set<number>>; absorbed: Set<string> } {
+  const descByPid = new Map<number, Set<number>>();
+  for (const [pid, set] of psTreeDescByPid) descByPid.set(pid, new Set(set));
+
+  // Only live interactive sessions own cards; attribute fd-linked work to them.
+  const owners = sessions.filter((s) => s.live && !s.headless && s.pid);
+
+  // Learn task-dir UUID -> owner pid: a session's own ps-tree descendants write
+  // to its task dir, revealing the UUID even when it differs from the sessionId.
+  const ownerPidByUuid = new Map<string, number>();
+  for (const o of owners) {
+    ownerPidByUuid.set(o.sessionId, o.pid!); // --resume case: UUID == sessionId
+    for (const d of psTreeDescByPid.get(o.pid!) ?? []) {
+      const uuid = fdUuidByPid.get(d);
+      if (uuid) ownerPidByUuid.set(uuid, o.pid!);
+    }
+  }
+
+  for (const [childPid, uuid] of fdUuidByPid) {
+    const ownerPid = ownerPidByUuid.get(uuid);
+    if (ownerPid !== undefined) descByPid.get(ownerPid)?.add(childPid);
+  }
+
+  // A live headless session whose pid sits in an interactive session's augmented
+  // descendants is that session's agent — shown on its card, hidden from the
+  // headless group. Never absorb a session into itself.
+  const absorbed = new Set<string>();
+  for (const s of sessions) {
+    if (!s.live || !s.headless || !s.pid) continue;
+    for (const o of owners) {
+      if (o.sessionId === s.sessionId) continue;
+      if (descByPid.get(o.pid!)?.has(s.pid)) {
+        absorbed.add(s.sessionId);
+        break;
+      }
+    }
+  }
+  return { descByPid, absorbed };
+}
