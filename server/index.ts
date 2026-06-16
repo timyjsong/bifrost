@@ -28,10 +28,17 @@ import { transcriptPathFor } from "./collectors/sessions";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import { handleFilesRequest } from "./files/handler";
 import { mutedSessions } from "./alerts/sessions";
-import { decide } from "./auth/guard";
+import { decide, isSecureRequest } from "./auth/guard";
 import { verifyToken, mintToken } from "./auth/tokens";
 import { consumeEnrollCode } from "./auth/enroll";
 import { isThrottled, recordFailure } from "./auth/throttle";
+import {
+  addClient,
+  removeClient,
+  broadcast as sseBroadcast,
+  sweep,
+  type SSEClient,
+} from "./sse";
 import type { Snapshot, ProjectInfo } from "../shared/types";
 
 const cfg = loadConfig();
@@ -170,7 +177,7 @@ async function fastTick() {
       sessions,
       system: sysRes.info,
     };
-    broadcast(snapshot);
+    broadcastSnapshot(snapshot);
     // Derive alert signals from the same poll and push on policy-passing edges.
     // After broadcast so a source hiccup never delays the dashboard; robust on
     // its own, but caught here too — alerting must never disrupt the tick.
@@ -198,23 +205,13 @@ async function slowTick() {
 }
 
 // ---- SSE ------------------------------------------------------------------
+// Client registry, broadcast, and the revocation sweep live in ./sse (testable).
 
-type SSEClient = { write: (chunk: string) => void; close: () => void };
-const clients = new Set<SSEClient>();
-
-function broadcast(snap: Snapshot) {
-  if (clients.size === 0) return;
-  const frame = `event: snapshot\ndata: ${JSON.stringify(snap)}\n\n`;
-  for (const c of clients) {
-    try {
-      c.write(frame);
-    } catch {
-      clients.delete(c);
-    }
-  }
+function broadcastSnapshot(snap: Snapshot) {
+  sseBroadcast(`event: snapshot\ndata: ${JSON.stringify(snap)}\n\n`);
 }
 
-function sseResponse(): Response {
+function sseResponse(token: string | null): Response {
   let client: SSEClient;
   const stream = new ReadableStream({
     start(controller) {
@@ -228,12 +225,13 @@ function sseResponse(): Response {
             // already closed
           }
         },
+        token, // tagged so the heartbeat can drop it if the token is revoked
       };
-      clients.add(client);
+      addClient(client);
       client.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
     },
     cancel() {
-      clients.delete(client);
+      removeClient(client);
     },
   });
   return new Response(stream, {
@@ -245,15 +243,12 @@ function sseResponse(): Response {
   });
 }
 
-// SSE heartbeat so proxies/browsers don't reap idle connections.
+// Heartbeat so proxies/browsers don't reap idle connections — and, on the same
+// beat, cut any stream whose token has been revoked since it connected (bounds
+// live-stream revocation latency to ~one heartbeat; the gate only covers new
+// requests).
 setInterval(() => {
-  for (const c of clients) {
-    try {
-      c.write(`: ping\n\n`);
-    } catch {
-      clients.delete(c);
-    }
-  }
+  void sweep(verifyToken);
 }, 25_000);
 
 // ---- static ---------------------------------------------------------------
@@ -312,12 +307,23 @@ const CSP = [
   "form-action 'none'",
 ].join("; ");
 
-function secured(res: Response, origin: string | null, proto: string | null): Response {
+// The HTTPS route's Host (from the enroll URL). The tailscale-serve → caddy chain
+// rewrites X-Forwarded-Proto but PRESERVES Host, so Host is the reliable "arrived
+// over HTTPS" signal here — used to emit HSTS on that route.
+const secureHost = (() => {
+  try {
+    return new URL(cfg.auth.enrollUrl).host;
+  } catch {
+    return "";
+  }
+})();
+
+function secured(res: Response, origin: string | null, secure: boolean): Response {
   const h = res.headers;
   h.set("X-Content-Type-Options", "nosniff");
   h.set("Referrer-Policy", "no-referrer");
   h.set("Content-Security-Policy", CSP);
-  if (proto === "https") h.set("Strict-Transport-Security", "max-age=31536000");
+  if (secure) h.set("Strict-Transport-Security", "max-age=31536000");
   // CORS is defensive only — the PWA calls its own origin (relative paths). An
   // allowlisted Origin gets ACAO so the browser may read the response; anything
   // else gets none and is blocked.
@@ -343,7 +349,7 @@ function preflight(origin: string | null): Response {
 
 // ---- routing (reached only AFTER the auth gate admits the request) --------
 
-async function route(req: Request, url: URL, now: number): Promise<Response> {
+async function route(req: Request, url: URL, now: number, ip: string): Promise<Response> {
   if (url.pathname === "/api/enroll" && req.method === "POST") {
     const body = (await req.json().catch(() => ({}))) as {
       code?: unknown;
@@ -352,6 +358,7 @@ async function route(req: Request, url: URL, now: number): Promise<Response> {
     const code = typeof body.code === "string" ? body.code : "";
     const label = typeof body.label === "string" ? body.label : "device";
     if (!(await consumeEnrollCode(code, now))) {
+      recordFailure(ip, now); // a bad enroll code counts toward the throttle too
       return Response.json({ error: "invalid or expired code" }, { status: 400 });
     }
     const token = await mintToken(label, now);
@@ -384,7 +391,7 @@ async function route(req: Request, url: URL, now: number): Promise<Response> {
     if (res) return res;
   }
   if (url.pathname === "/api/events") {
-    return sseResponse();
+    return sseResponse(req.headers.get("x-bifrost-token"));
   }
   if (url.pathname === "/api/health") {
     return Response.json({ ok: true, generatedAt: snapshot.generatedAt });
@@ -402,13 +409,13 @@ const server = Bun.serve({
     const url = new URL(req.url);
     const host = req.headers.get("host");
     const origin = req.headers.get("origin");
-    const proto = req.headers.get("x-forwarded-proto"); // caddy sets this on HTTPS
-    // Throttle key: caddy (HTTPS route) sets a trustworthy X-Forwarded-For; on the
-    // raw :4444 route XFF is spoofable, so use the real socket address there.
-    const ip =
-      proto === "https"
-        ? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "caddy"
-        : srv.requestIP(req)?.address ?? "unknown";
+    const proto = req.headers.get("x-forwarded-proto");
+    // The proxy chain rewrites X-Forwarded-Proto but preserves Host, so detect the
+    // HTTPS route by its Host (HSTS rides on this).
+    const secure = isSecureRequest(proto, host, secureHost);
+    // Throttle key: the real socket address — unspoofable. On the HTTPS route that
+    // is caddy, so HTTPS clients share one bucket; fine for a single-user tool.
+    const ip = srv.requestIP(req)?.address ?? "unknown";
     const now = Date.now();
 
     // CORS preflight is answered before auth — the browser attaches no token to a
@@ -420,7 +427,7 @@ const server = Bun.serve({
       return secured(
         Response.json({ error: "too many attempts" }, { status: 429 }),
         origin,
-        proto,
+        secure,
       );
     }
 
@@ -441,11 +448,11 @@ const server = Bun.serve({
       return secured(
         Response.json({ error: verdict.reason }, { status: verdict.status }),
         origin,
-        proto,
+        secure,
       );
     }
 
-    return secured(await route(req, url, now), origin, proto);
+    return secured(await route(req, url, now, ip), origin, secure);
   },
 });
 

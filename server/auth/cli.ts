@@ -12,7 +12,7 @@
  */
 import { loadConfig } from "../config";
 import { mintEnrollCode, ENROLL_TTL_MS } from "./enroll";
-import { listDevices, revokeByLabel, revokeAll } from "./tokens";
+import { listDevices, revokeByLabel, revokeByTokenPrefix, revokeAll } from "./tokens";
 
 async function qr(text: string): Promise<string | null> {
   try {
@@ -48,7 +48,7 @@ if (cmd === "enroll") {
     console.log("No enrolled devices.");
   } else {
     for (const d of devices) {
-      console.log(`${d.label}\t${new Date(d.createdAt).toLocaleString()}`);
+      console.log(`${d.id}  ${d.label.padEnd(10)}  ${new Date(d.createdAt).toLocaleString()}`);
     }
   }
 } else if (cmd === "revoke") {
@@ -59,12 +59,20 @@ if (cmd === "enroll") {
   }
   const n = await revokeByLabel(label);
   console.log(`Revoked ${n} device(s) labelled "${label}".`);
+} else if (cmd === "revoke-id") {
+  const id = process.argv[3];
+  if (!id) {
+    console.error("usage: bun server/auth/cli.ts revoke-id <id from `list`>");
+    process.exit(1);
+  }
+  const n = await revokeByTokenPrefix(id);
+  console.log(`Revoked ${n} device(s) with id ${id}.`);
 } else if (cmd === "revoke-all") {
   await revokeAll();
   console.log("Revoked all devices. Every device must re-enroll.");
 } else {
   console.error(
-    "usage: bun server/auth/cli.ts <enroll [label] | list | revoke <label> | revoke-all>",
+    "usage: bun server/auth/cli.ts <enroll [label] | list | revoke <label> | revoke-id <id> | revoke-all>",
   );
   process.exit(1);
 }

@@ -1,7 +1,8 @@
 # Phase 0 (Build 0) — Auth / Security
 
-**Status: GREENLIT — building (2026-06-16). Requirements + ACs locked; I
-greenlit the full hardened spec.**
+**Status: BUILT & CONVERGED — deployed to prod 2026-06-16.** Gate live and
+enforcing on both routes; two devices enrolled (desktop + iOS PWA). All
+verification ACs pass live. As-built refinements recorded at the bottom.
 
 Robustness dialed UP per my explicit call (2026-06-16): *"make it more robust
 than you currently think it needs — once we're past Phase 0 there's a chance I
@@ -135,5 +136,30 @@ helps regardless of auth primitive.
   `server/files/confine.ts` analog) — tested against forged Origins, bad Hosts, and
   malformed/timing-attack token inputs.
 
+## As built (refinements discovered during the build — 2026-06-16)
+- **Enrollment** = box-minted one-time code (disk-backed in `data/`, single-use +
+  10-min TTL) → POST `/api/enroll` → per-device token. CLI: `bun run enroll` prints
+  a code + terminal QR (QR encodes the HTTPS enroll URL with the code in the `#`
+  fragment, so the code never hits server logs).
+- **HSTS is gated by Host, not proto.** The `tailscale serve → caddy → :4444` chain
+  rewrites `X-Forwarded-Proto`, so the server detects the HTTPS route by its
+  (preserved) Host (`isSecureRequest`). HSTS verified present on HTTPS, absent on
+  raw http.
+- **Live-stream revocation** (`server/sse.ts`): the gate only covers new requests,
+  so each SSE client is tagged with its token and the 25s heartbeat re-verifies it —
+  a revoked device's open stream is cut within one beat. Unit-tested + live-verified.
+- **Per-device ids + `revoke-id`** — labels collide (two `iPhone`s), so `list` shows
+  an 8-char id and `revoke-id <id>` targets one device.
+- **Enroll-failure throttling** — a bad enroll code also counts toward the per-IP
+  brute-force throttle (codes are 96-bit so guessing is infeasible regardless).
+- **Token lives in `localStorage`** (spec said IndexedDB) — equivalent XSS exposure;
+  the real control is the strict CSP (`connect-src 'self'`) + react-markdown escaping
+  HTML, both verified.
+
+**Verified live (both routes):** unauth→401, forged Host→403, cross-origin→403,
+enroll→token→200, bad/revoked token→401, reused code→400, throttle→429, HSTS on
+HTTPS only, CSP/security headers present, SW does not cache `/api`, data files 0600,
+XSS surface clean (no `dangerouslySetInnerHTML` / raw-HTML markdown).
+
 ## Gate
-I greenlight this locked spec before code starts.
+I greenlighted the locked spec (2026-06-16); built, reviewed, and converged same day.

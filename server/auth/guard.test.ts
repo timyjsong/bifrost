@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { decide, type GuardInput } from "./guard";
+import { decide, isSecureRequest, type GuardInput } from "./guard";
 
 const allow = {
   allowedHosts: ["100.100.100.100:4444", "dev.your-tailnet.ts.net:8444"],
@@ -90,6 +90,15 @@ test("enroll is reachable without a token, but host/origin are enforced", () => 
   });
   expect(badHost.allow).toBe(false);
   if (!badHost.allow) expect(badHost.status).toBe(403);
+});
+
+test("isSecureRequest: true on https proto or a matching secure Host, else false", () => {
+  const sh = "dev.your-tailnet.ts.net:8444";
+  expect(isSecureRequest("https", null, sh)).toBe(true); // proxy set proto
+  expect(isSecureRequest(null, sh, sh)).toBe(true); // Host matches (the real path)
+  expect(isSecureRequest(null, "100.100.100.100:4444", sh)).toBe(false); // raw http host
+  expect(isSecureRequest(null, null, sh)).toBe(false); // no host
+  expect(isSecureRequest(null, "anything", "")).toBe(false); // secureHost unconfigured
 });
 
 test("empty allowlists fail closed — every api call denied", () => {

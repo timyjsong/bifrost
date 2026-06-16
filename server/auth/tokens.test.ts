@@ -49,3 +49,27 @@ test("tokens are 256-bit (43 base64url chars) and unique", () => {
   expect(a).not.toBe(b);
   expect(a.length).toBe(43); // 32 bytes base64url, unpadded
 });
+
+test("listDevices exposes an 8-char id (token prefix)", async () => {
+  await tokens.revokeAll();
+  const t = await tokens.mintToken("laptop", 1000);
+  const [d] = await tokens.listDevices();
+  expect(d.id).toBe(t.slice(0, 8));
+  expect(d.id.length).toBe(8);
+});
+
+test("revokeByTokenPrefix removes only the matching device", async () => {
+  await tokens.revokeAll();
+  const t1 = await tokens.mintToken("safari", 1);
+  const t2 = await tokens.mintToken("pwa", 2);
+  expect(await tokens.revokeByTokenPrefix(t1.slice(0, 8))).toBe(1);
+  expect(await tokens.verifyToken(t1)).toBe(false);
+  expect(await tokens.verifyToken(t2)).toBe(true); // the other device survives
+});
+
+test("revokeByTokenPrefix ignores a too-short prefix (no over-broad wipe)", async () => {
+  await tokens.revokeAll();
+  const t = await tokens.mintToken("a", 1);
+  expect(await tokens.revokeByTokenPrefix("abc")).toBe(0); // < 6 chars
+  expect(await tokens.verifyToken(t)).toBe(true);
+});

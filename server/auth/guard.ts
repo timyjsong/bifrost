@@ -28,6 +28,19 @@ function isApi(pathname: string): boolean {
   return pathname === "/api" || pathname.startsWith("/api/");
 }
 
+/**
+ * Did this request arrive over HTTPS? The tailscale-serve → caddy chain rewrites
+ * X-Forwarded-Proto but preserves Host, so a matching secure Host is the reliable
+ * signal (used to gate HSTS). An empty `secureHost` means "can't tell" → not secure.
+ */
+export function isSecureRequest(
+  proto: string | null,
+  host: string | null,
+  secureHost: string,
+): boolean {
+  return proto === "https" || (!!secureHost && host === secureHost);
+}
+
 // The ONE /api endpoint reachable without a token (besides health, handled
 // first). Enrollment must be pre-auth — it's how the first device gets a token —
 // but it still passes the Host/Origin allowlists below.

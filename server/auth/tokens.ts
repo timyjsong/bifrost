@@ -75,14 +75,33 @@ export async function verifyToken(presented: string | null): Promise<boolean> {
   return ok;
 }
 
-export async function listDevices(): Promise<Omit<DeviceToken, "token">[]> {
-  return (await load()).map(({ label, createdAt }) => ({ label, createdAt }));
+export interface DeviceInfo {
+  id: string; // first 8 chars of the token — disambiguates same-labelled devices
+  label: string;
+  createdAt: number;
+}
+
+export async function listDevices(): Promise<DeviceInfo[]> {
+  return (await load()).map(({ token, label, createdAt }) => ({
+    id: token.slice(0, 8),
+    label,
+    createdAt,
+  }));
 }
 
 /** Revoke every token with this label (CLI op). Returns how many were removed. */
 export async function revokeByLabel(label: string): Promise<number> {
   const list = await load();
   const kept = list.filter((d) => d.label !== label);
+  await save(kept);
+  return list.length - kept.length;
+}
+
+/** Revoke one device by its `list` id (token prefix) — for same-labelled devices. */
+export async function revokeByTokenPrefix(prefix: string): Promise<number> {
+  if (prefix.length < 6) return 0; // guard against an over-broad match
+  const list = await load();
+  const kept = list.filter((d) => !d.token.startsWith(prefix));
   await save(kept);
   return list.length - kept.length;
 }
