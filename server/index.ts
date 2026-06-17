@@ -28,7 +28,7 @@ import { transcriptPathFor } from "./collectors/sessions";
 import { sessionStream } from "./drive/live";
 import { resolveTarget, liveTmuxSet } from "./drive/target";
 import { sendText, sendKey, capturePane } from "./drive/send";
-import { parsePermissionMenu, isValidAnswerKey } from "./drive/menu";
+import { parsePermissionMenu, isValidAnswerKey, isPaneWorking } from "./drive/menu";
 import { slashFor } from "./drive/slash";
 import { getDraft, setDraft } from "./drive/drafts";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
@@ -457,7 +457,8 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     const sid = decodeURIComponent(paneMatch[1]);
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
-    if (!tgt.ok) return Response.json({ drivable: false, menu: null, raw: "" });
+    if (!tgt.ok)
+      return Response.json({ drivable: false, menu: null, raw: "", working: false });
     let raw = "";
     try {
       raw = await capturePane(tgt.tmuxSession);
@@ -465,7 +466,12 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       /* pane vanished between resolve and capture */
     }
     const tail = raw.split("\n").filter((l) => l.trim()).slice(-30).join("\n");
-    return Response.json({ drivable: true, menu: parsePermissionMenu(raw), raw: tail });
+    return Response.json({
+      drivable: true,
+      menu: parsePermissionMenu(raw),
+      raw: tail,
+      working: isPaneWorking(raw),
+    });
   }
   // Answer a permission menu — a deliberately tiny surface (a digit or Enter),
   // validated, then routed as a key. A bad key is rejected, never sent.

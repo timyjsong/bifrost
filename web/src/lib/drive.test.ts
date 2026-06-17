@@ -26,15 +26,8 @@ describe("promptGate — warn-and-allow (AC3.5)", () => {
     expect(g.warning).toMatch(/attached|collide/);
   });
 
-  test("a working session warns (queues) but still allows", () => {
-    const g = promptGate({ tmuxSession: "atlas-web", state: "working" });
-    expect(g.canSend).toBe(true);
-    expect(g.warning).toMatch(/mid-turn|queue/);
-  });
-
-  test("attached takes precedence over working in the warning", () => {
-    const g = promptGate({ tmuxSession: "atlas-web", tmuxAttached: true, state: "working" });
-    expect(g.warning).toMatch(/attached|collide/);
+  test("the working state is not a gate concern — no warning (UI disables instead)", () => {
+    expect(promptGate({ tmuxSession: "atlas-web" })).toEqual({ canSend: true });
   });
 });
 

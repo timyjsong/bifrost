@@ -144,6 +144,10 @@ export function DriveView({
   const [pending, setPending] = useState<string | null>(null); // optimistic echo
   const [interrupting, setInterrupting] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
+  // Optimistic send↔stop: flips instantly on the user's click, then hands off to
+  // the real pane "working" reading (ground truth, like the TUI). Because the pane
+  // is accurate — not a laggy derived guess — it can't flip back.
+  const [optimistic, setOptimistic] = useState<boolean | null>(null);
   const pendingBase = useRef(0); // user-prompt count at send time
   const skipSave = useRef(true); // don't persist the freshly-loaded draft back
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -152,6 +156,11 @@ export function DriveView({
 
   const gate = promptGate(session);
   const suggestions = filterSlash(text, slashCmds);
+  // A turn is in flight → send becomes stop, input disabled (no queueing). Read
+  // straight from the live pane (the same source as the TUI); the optimistic flip
+  // wins only until the pane confirms it.
+  const paneWorking = pane?.working ?? false;
+  const working = optimistic ?? paneWorking;
 
   // Slash-command list for the suggester (disk-scanned server-side, fetched once).
   useEffect(() => {
@@ -162,6 +171,16 @@ export function DriveView({
     setText(name + " "); // fill, don't send — args can follow
     taRef.current?.focus();
   };
+
+  // Lock the dashboard's scroll behind the overlay so there's only one scrollbar
+  // (the inner transcript) — not the page's persisting underneath it.
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
 
   // Stick to the latest as the conversation grows (live feel).
   useEffect(() => {
@@ -204,30 +223,53 @@ export function DriveView({
     }
   }, [state, pending]);
 
+  // Hand off to the pane once it agrees with the optimistic flip — no flicker,
+  // because the pane is accurate (a "not working" reading after a stop is real,
+  // not stale). A backstop clears it if the pane never confirms (an instant turn).
+  useEffect(() => {
+    if (optimistic !== null && optimistic === paneWorking) setOptimistic(null);
+  }, [optimistic, paneWorking]);
+  useEffect(() => {
+    if (optimistic === null) return;
+    const t = setTimeout(() => setOptimistic(null), 4000);
+    return () => clearTimeout(t);
+  }, [optimistic]);
+
+  // A different session opened — drop any stale optimistic flip.
+  useEffect(() => setOptimistic(null), [session.sessionId]);
+
   const send = async () => {
     const t = text.trim();
-    if (!gate.canSend || !t || sending) return;
+    if (!gate.canSend || working || !t || sending) return;
     setSending(true);
     setError(null);
     pendingBase.current = userPromptCount(state);
-    const res = await sendPrompt(session.sessionId, text);
+    setPending(t); // optimistic echo
+    setOptimistic(true); // flip to stop immediately
+    skipSave.current = true; // server clears the draft on send
+    setText("");
+    const res = await sendPrompt(session.sessionId, t);
     setSending(false);
-    if (res.ok) {
-      setPending(text); // optimistic until the transcript confirms
-      skipSave.current = true; // server already cleared the draft on send
-      setText("");
-    } else {
-      setError(res.reason ?? "send failed"); // loud failure — the draft is preserved
+    if (!res.ok) {
+      // revert the optimism, restore the draft, surface the failure loud
+      setPending(null);
+      setOptimistic(null);
+      setText(t);
+      setError(res.reason ?? "send failed");
     }
   };
 
   const stop = async () => {
     if (interrupting) return;
     setInterrupting(true);
+    setOptimistic(false); // flip to send immediately
     setError(null);
     const res = await interrupt(session.sessionId);
     setInterrupting(false);
-    if (!res.ok) setError(res.reason ?? "interrupt failed");
+    if (!res.ok) {
+      setOptimistic(null); // failed — let the pane drive
+      setError(res.reason ?? "interrupt failed");
+    }
   };
 
   const answerMenu = async (key: string) => {
@@ -336,17 +378,6 @@ export function DriveView({
           )}
           {gate.canSend ? (
             <>
-              {session.state === "working" && (
-                <div className="mb-2 flex justify-center">
-                  <button
-                    onClick={() => void stop()}
-                    disabled={interrupting}
-                    className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-[12.5px] font-medium text-danger transition-colors hover:bg-danger/20 disabled:opacity-50"
-                  >
-                    {interrupting ? "stopping…" : "■ stop"}
-                  </button>
-                </div>
-              )}
               {gate.warning && (
                 <div className="mb-1.5 text-[11px] text-gold/90">⚠ {gate.warning}</div>
               )}
@@ -375,6 +406,7 @@ export function DriveView({
                   <textarea
                     ref={taRef}
                     value={text}
+                    disabled={working}
                     onChange={(e) => setText(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Tab" && suggestions.length > 0) {
@@ -388,16 +420,30 @@ export function DriveView({
                       }
                     }}
                     rows={2}
-                    placeholder="message this session…  (⌘/Ctrl+Enter to send · / for commands)"
-                    className="max-h-40 min-h-[40px] flex-1 resize-y rounded-md border border-line bg-panel px-3 py-2 text-[13px] text-ink placeholder:text-ink-mute/60 focus:border-gold-dim/60 focus:outline-none"
+                    placeholder={
+                      working
+                        ? "running — stop to interrupt"
+                        : "message this session…  (⌘/Ctrl+Enter to send · / for commands)"
+                    }
+                    className="max-h-40 min-h-[40px] flex-1 resize-y rounded-md border border-line bg-panel px-3 py-2 text-[13px] text-ink placeholder:text-ink-mute/60 focus:border-gold-dim/60 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                   />
-                  <button
-                    onClick={() => void send()}
-                    disabled={sending || !text.trim()}
-                    className="shrink-0 rounded-md border border-gold-dim/60 bg-gold/10 px-3.5 py-2 text-[13px] text-gold transition-colors hover:bg-gold/20 disabled:opacity-40"
-                  >
-                    {sending ? "…" : "send"}
-                  </button>
+                  {working ? (
+                    <button
+                      onClick={() => void stop()}
+                      disabled={interrupting}
+                      className="shrink-0 rounded-md border border-danger/50 bg-danger/10 px-3.5 py-2 text-[13px] font-medium text-danger transition-colors hover:bg-danger/20 disabled:opacity-50"
+                    >
+                      {interrupting ? "…" : "■ stop"}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => void send()}
+                      disabled={sending || !text.trim()}
+                      className="shrink-0 rounded-md border border-gold-dim/60 bg-gold/10 px-3.5 py-2 text-[13px] text-gold transition-colors hover:bg-gold/20 disabled:opacity-40"
+                    >
+                      {sending ? "…" : "send"}
+                    </button>
+                  )}
                 </div>
               </div>
             </>

@@ -63,7 +63,7 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
  */
 export function usePaneState(
   sessionId: string | null,
-  intervalMs = 1500,
+  intervalMs = 700,
 ): PaneState | null {
   const [pane, setPane] = useState<PaneState | null>(null);
   useEffect(() => {

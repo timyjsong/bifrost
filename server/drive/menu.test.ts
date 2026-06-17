@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parsePermissionMenu, isValidAnswerKey } from "./menu";
+import { parsePermissionMenu, isValidAnswerKey, isPaneWorking } from "./menu";
 
 // Fixture mirrors the assumed Claude Code permission dialog (boxed, ❯ cursor).
 // NOTE: confirm against a live prompt at review — if the real format differs,
@@ -54,6 +54,59 @@ describe("parsePermissionMenu", () => {
     const menu = parsePermissionMenu(two)!;
     expect(menu.prompt).toBe("New question?");
     expect(menu.options.map((o) => o.label)).toEqual(["Yes", "No"]);
+  });
+
+  // The M5 review fix: an ordinary numbered list in conversation must NOT read as
+  // a permission prompt.
+  test("a numbered list mid-pane (output below it) is NOT a menu", () => {
+    const filler = Array.from({ length: 12 }, (_, i) => `output line ${i}`).join("\n");
+    const pane = `Here are the steps:\n1. first\n2. second\n3. third\n${filler}`;
+    expect(parsePermissionMenu(pane)).toBeNull();
+  });
+
+  test("a bottom-anchored numbered list with no question above is NOT a menu", () => {
+    expect(parsePermissionMenu("here are two options\n1. apples\n2. oranges")).toBeNull();
+  });
+
+  test("a question above a list still needs the list at the bottom", () => {
+    const filler = Array.from({ length: 12 }, () => "more output").join("\n");
+    expect(parsePermissionMenu(`What next?\n1. a\n2. b\n${filler}`)).toBeNull();
+  });
+});
+
+// Fixtures from a real claude pane (the working line was captured live).
+const WORKING_PANE = `  Running 1 shell command…
+  ⎿  $ cd /home/you/bifrost
+✢ Crystallizing… (2m 55s · ↓ 11.5k tokens)
+  ⎿  Tip: Use /btw to ask a quick side question
+────────────────────────────────────────────────
+❯ some queued text
+────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)        /rc active`;
+
+const IDLE_PANE = `● Done — here's the result.
+  ⎿  output line one
+     output line two
+────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)        /rc active`;
+
+describe("isPaneWorking", () => {
+  test("a live elapsed timer ((Nm Ns · …)) means working", () => {
+    expect(isPaneWorking(WORKING_PANE)).toBe(true);
+    expect(isPaneWorking("● thinking… (5s · ↑ 1.2k tokens)\n❯")).toBe(true);
+  });
+
+  test("no timer line means idle", () => {
+    expect(isPaneWorking(IDLE_PANE)).toBe(false);
+    expect(isPaneWorking("")).toBe(false);
+    expect(isPaneWorking("just some output\n❯ ")).toBe(false);
+  });
+
+  test("a parens-with-time deep in scrollback (not the status line) doesn't count", () => {
+    const filler = Array.from({ length: 15 }, () => "more output").join("\n");
+    expect(isPaneWorking(`the build took (3s · whatever)\n${filler}\n❯`)).toBe(false);
   });
 });
 

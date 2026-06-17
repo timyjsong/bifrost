@@ -2,10 +2,11 @@ import { apiFetch } from "./api";
 import type { PaneState, SlashCommand } from "../../../shared/types";
 
 /**
- * The warn-and-allow gate for prompting a session (AC3.5). Pure, so the contract
- * is tested: non-tmux sessions can't be driven (disabled + reason); an attached or
- * mid-turn session warns but still sends. Attached takes precedence — a client
- * typing in the pane is the real collision, queueing behind a turn is benign.
+ * The gate for whether a session can be driven at all (AC3.5). Pure, so the
+ * contract is tested: non-tmux sessions can't be driven (disabled + reason); an
+ * attached session warns but still sends (collision risk with the desktop GUI).
+ * The `working` state is handled in the UI, not here — send becomes stop and the
+ * input is disabled, so there's no queueing to warn about.
  */
 export interface PromptGate {
   canSend: boolean;
@@ -16,7 +17,6 @@ export interface PromptGate {
 export function promptGate(s: {
   tmuxSession?: string;
   tmuxAttached?: boolean;
-  state?: string;
 }): PromptGate {
   if (!s.tmuxSession) {
     return {
@@ -28,12 +28,6 @@ export function promptGate(s: {
     return {
       canSend: true,
       warning: "a client is attached (likely your desktop GUI) — sending may collide with typing there",
-    };
-  }
-  if (s.state === "working") {
-    return {
-      canSend: true,
-      warning: "this session is mid-turn — your prompt will queue behind it",
     };
   }
   return { canSend: true };
