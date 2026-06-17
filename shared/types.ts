@@ -156,6 +156,14 @@ export interface PaneState {
   raw: string;
 }
 
+// A slash command the suggester can offer. Non-authoritative: built-ins are a
+// static list and plugin/MCP commands aren't enumerated — you can always type any
+// command raw and send it.
+export interface SlashCommand {
+  name: string; // includes the leading slash, e.g. "/clear"
+  source: "builtin" | "user" | "project" | "skill";
+}
+
 export interface Snapshot {
   generatedAt: number;
   bundleId?: number; // dist/index.html mtime — frontend reloads when it changes

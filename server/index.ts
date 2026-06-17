@@ -29,6 +29,7 @@ import { sessionStream } from "./drive/live";
 import { resolveTarget, liveTmuxSet } from "./drive/target";
 import { sendText, sendKey, capturePane } from "./drive/send";
 import { parsePermissionMenu, isValidAnswerKey } from "./drive/menu";
+import { slashFor } from "./drive/slash";
 import { getDraft, setDraft } from "./drive/drafts";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import { handleFilesRequest } from "./files/handler";
@@ -500,6 +501,15 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       /* pane vanished */
     }
     return Response.json({ text });
+  }
+  // Slash-command suggestions (M7) — disk-scanned (user/project/skills) + static
+  // built-ins, for the session's cwd. Non-authoritative; the client filters.
+  const slashMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/slash$/);
+  if (slashMatch && req.method === "GET") {
+    const sid = decodeURIComponent(slashMatch[1]);
+    const sess = snapshot.sessions.find((s) => s.sessionId === sid);
+    if (!sess) return Response.json({ commands: [] });
+    return Response.json({ commands: await slashFor(cfg.claudeDir, sess.cwd, now) });
   }
   // Cross-device prompt draft: the uncommitted input buffer, server-side per
   // session so it follows the user across devices.

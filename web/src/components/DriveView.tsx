@@ -4,6 +4,7 @@ import type {
   InteractionMessage,
   InteractionState,
   SessionInfo,
+  SlashCommand,
 } from "../../../shared/types";
 import { basename, tildify } from "../lib/format";
 import { useSessionStream, usePaneState } from "../lib/useSessionStream";
@@ -14,6 +15,8 @@ import {
   saveDraft,
   interrupt,
   answer,
+  getSlashCommands,
+  filterSlash,
 } from "../lib/drive";
 import { Dot } from "./ui";
 
@@ -144,8 +147,21 @@ export function DriveView({
   const pendingBase = useRef(0); // user-prompt count at send time
   const skipSave = useRef(true); // don't persist the freshly-loaded draft back
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [slashCmds, setSlashCmds] = useState<SlashCommand[]>([]);
 
   const gate = promptGate(session);
+  const suggestions = filterSlash(text, slashCmds);
+
+  // Slash-command list for the suggester (disk-scanned server-side, fetched once).
+  useEffect(() => {
+    void getSlashCommands(session.sessionId).then(setSlashCmds);
+  }, [session.sessionId]);
+
+  const pickSlash = (name: string) => {
+    setText(name + " "); // fill, don't send — args can follow
+    taRef.current?.focus();
+  };
 
   // Stick to the latest as the conversation grows (live feel).
   useEffect(() => {
@@ -337,27 +353,52 @@ export function DriveView({
               {error && (
                 <div className="mb-1.5 text-[11px] text-danger">send failed: {error}</div>
               )}
-              <div className="flex items-end gap-2">
-                <textarea
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                      e.preventDefault();
-                      void send();
-                    }
-                  }}
-                  rows={2}
-                  placeholder="message this session…  (⌘/Ctrl+Enter to send)"
-                  className="max-h-40 min-h-[40px] flex-1 resize-y rounded-md border border-line bg-panel px-3 py-2 text-[13px] text-ink placeholder:text-ink-mute/60 focus:border-gold-dim/60 focus:outline-none"
-                />
-                <button
-                  onClick={() => void send()}
-                  disabled={sending || !text.trim()}
-                  className="shrink-0 rounded-md border border-gold-dim/60 bg-gold/10 px-3.5 py-2 text-[13px] text-gold transition-colors hover:bg-gold/20 disabled:opacity-40"
-                >
-                  {sending ? "…" : "send"}
-                </button>
+              <div className="relative">
+                {suggestions.length > 0 && (
+                  <div className="absolute bottom-full mb-1 max-h-56 w-full overflow-auto rounded-md border border-line bg-panel-raised shadow-lg">
+                    {suggestions.map((c) => (
+                      <button
+                        key={c.name}
+                        onMouseDown={(e) => {
+                          e.preventDefault(); // keep textarea focus
+                          pickSlash(c.name);
+                        }}
+                        className="flex w-full items-center justify-between px-3 py-1.5 text-left text-[12.5px] text-ink-dim transition-colors hover:bg-panel hover:text-gold"
+                      >
+                        <span className="font-mono">{c.name}</span>
+                        <span className="text-[10px] text-ink-mute">{c.source}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="flex items-end gap-2">
+                  <textarea
+                    ref={taRef}
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Tab" && suggestions.length > 0) {
+                        e.preventDefault();
+                        pickSlash(suggestions[0].name); // accept the top suggestion
+                        return;
+                      }
+                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                        e.preventDefault();
+                        void send();
+                      }
+                    }}
+                    rows={2}
+                    placeholder="message this session…  (⌘/Ctrl+Enter to send · / for commands)"
+                    className="max-h-40 min-h-[40px] flex-1 resize-y rounded-md border border-line bg-panel px-3 py-2 text-[13px] text-ink placeholder:text-ink-mute/60 focus:border-gold-dim/60 focus:outline-none"
+                  />
+                  <button
+                    onClick={() => void send()}
+                    disabled={sending || !text.trim()}
+                    className="shrink-0 rounded-md border border-gold-dim/60 bg-gold/10 px-3.5 py-2 text-[13px] text-gold transition-colors hover:bg-gold/20 disabled:opacity-40"
+                  >
+                    {sending ? "…" : "send"}
+                  </button>
+                </div>
               </div>
             </>
           ) : (

@@ -1,5 +1,5 @@
 import { apiFetch } from "./api";
-import type { PaneState } from "../../../shared/types";
+import type { PaneState, SlashCommand } from "../../../shared/types";
 
 /**
  * The warn-and-allow gate for prompting a session (AC3.5). Pure, so the contract
@@ -110,6 +110,36 @@ export async function getCapture(sessionId: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+export async function getSlashCommands(sessionId: string): Promise<SlashCommand[]> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/slash`);
+    if (!r.ok) return [];
+    return ((await r.json()) as { commands?: SlashCommand[] }).commands ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Suggestions for the current input, or [] when not typing a slash command.
+ * Suggests only while the input is "/" + non-space (the command token, no args
+ * yet); substring match, prefix matches ranked first, capped at 8. Pure +
+ * client-side — zero network per keystroke. Never gates: type past it and send.
+ */
+export function filterSlash(input: string, commands: SlashCommand[]): SlashCommand[] {
+  const m = input.match(/^\/(\S*)$/);
+  if (!m) return [];
+  const q = m[1].toLowerCase();
+  return commands
+    .filter((c) => c.name.toLowerCase().slice(1).includes(q))
+    .sort((a, b) => {
+      const ap = a.name.toLowerCase().slice(1).startsWith(q) ? 0 : 1;
+      const bp = b.name.toLowerCase().slice(1).startsWith(q) ? 0 : 1;
+      return ap - bp || a.name.localeCompare(b.name);
+    })
+    .slice(0, 8);
 }
 
 export async function getDraft(sessionId: string): Promise<string> {
