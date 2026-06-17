@@ -26,6 +26,9 @@ import {
 } from "./tasknames";
 import { transcriptPathFor } from "./collectors/sessions";
 import { sessionStream } from "./drive/live";
+import { resolveTarget, liveTmuxSet } from "./drive/target";
+import { sendText } from "./drive/send";
+import { getDraft, setDraft } from "./drive/drafts";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import { handleFilesRequest } from "./files/handler";
 import { mutedSessions } from "./alerts/sessions";
@@ -403,6 +406,44 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     const tpath = transcriptPathFor(sid);
     if (!tpath) return new Response("no such session", { status: 404 });
     return sessionStream(sid, tpath, req.headers.get("x-bifrost-token"), verifyToken);
+  }
+  // Send a prompt into a session (Channel 2). The target is re-validated at send
+  // time against the LIVE tmux set, so a non-injectable or vanished session fails
+  // loud (409) rather than misdirecting. No content filter — "anything typeable".
+  const promptMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/prompt$/);
+  if (promptMatch && req.method === "POST") {
+    const sid = decodeURIComponent(promptMatch[1]);
+    const body = (await req.json().catch(() => ({}))) as { text?: unknown };
+    const text = typeof body.text === "string" ? body.text : "";
+    if (!text.trim()) return Response.json({ ok: false, reason: "empty" }, { status: 400 });
+    if (text.length > 100_000)
+      return Response.json({ ok: false, reason: "too-long" }, { status: 413 });
+    const sess = snapshot.sessions.find((s) => s.sessionId === sid);
+    const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
+    if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
+    try {
+      await sendText(tgt.tmuxSession, text);
+    } catch (err) {
+      return Response.json(
+        { ok: false, reason: "send-failed", detail: String((err as Error).message) },
+        { status: 502 },
+      );
+    }
+    await setDraft(sid, ""); // committed — clear the cross-device draft
+    return Response.json({ ok: true });
+  }
+  // Cross-device prompt draft: the uncommitted input buffer, server-side per
+  // session so it follows the user across devices.
+  const draftMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/draft$/);
+  if (draftMatch) {
+    const sid = decodeURIComponent(draftMatch[1]);
+    if (req.method === "GET") return Response.json({ text: await getDraft(sid) });
+    if (req.method === "PUT") {
+      const body = (await req.json().catch(() => ({}))) as { text?: unknown };
+      const text = typeof body.text === "string" ? body.text.slice(0, 100_000) : "";
+      await setDraft(sid, text);
+      return Response.json({ ok: true });
+    }
   }
   if (url.pathname === "/api/health") {
     return Response.json({ ok: true, generatedAt: snapshot.generatedAt });
