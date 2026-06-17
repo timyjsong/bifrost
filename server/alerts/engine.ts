@@ -52,6 +52,7 @@ export interface FiredAlert {
   title: string;
   body: string;
   tag: string;
+  instance?: string; // the entity this fired for (a session id) — used to deep-link
 }
 
 const DEFS = new Map<SignalId, SignalDef>(CATALOG.map((d) => [d.id, d]));
@@ -177,5 +178,6 @@ function compose(def: SignalDef, r: SignalReading): FiredAlert {
     // collapse-key: a repeat replaces, doesn't stack. Per-instance signals get a
     // distinct key per entity, so two waiting sessions are two notifications.
     tag: r.instance ? `${def.id}:${r.instance}` : def.id,
+    instance: r.instance,
   };
 }

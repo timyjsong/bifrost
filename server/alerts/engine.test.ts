@@ -183,3 +183,27 @@ describe("composed alert shape", () => {
     });
   });
 });
+
+describe("per-instance alerts carry the instance (deep-link, M8)", () => {
+  test("a session-scoped fire reports its session id on the FiredAlert", () => {
+    let state: EngineState = {};
+    // transition: arm inactive, then fire on the active edge
+    let out = evaluate(
+      [{ id: "session_approval", instance: "sess-123", active: false }],
+      defaultPolicy(),
+      state,
+      0,
+    );
+    state = out.next;
+    out = evaluate(
+      [{ id: "session_approval", instance: "sess-123", active: true }],
+      defaultPolicy(),
+      state,
+      1_000,
+    );
+    const fire = out.fired.find((f) => f.id === "session_approval");
+    expect(fire).toBeDefined();
+    expect(fire!.instance).toBe("sess-123"); // → /?session=sess-123 deep link
+    expect(fire!.tag).toBe("session_approval:sess-123");
+  });
+});

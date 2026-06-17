@@ -220,6 +220,16 @@ function Dashboard() {
       setDriveSessionId(null); // the session ended — drop back to the dashboard
     }
   }, [driveSessionId, driveSession, snap?.generatedAt]);
+  // Deep link: a push notification (or any /?session=<id> link) opens that
+  // session's drive view straight away — tap the approval push, land where you
+  // can answer (M8). Clean the URL so a manual refresh doesn't re-trigger.
+  useEffect(() => {
+    const sid = new URLSearchParams(window.location.search).get("session");
+    if (sid) {
+      setDriveSessionId(sid);
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, []);
   // Open on the Sessions pane (before paint, so no flash of Projects). No-op on
   // desktop (block layout — scrollLeft clamps to 0, top of the stack shows).
   useLayoutEffect(() => {

@@ -58,7 +58,10 @@ export async function evaluateAlerts(
   engineState = next;
 
   for (const a of fired) {
-    sendToAll({ title: a.title, body: a.body, tag: a.tag, url: "/" })
+    // Deep-link a session-scoped alert (e.g. session_approval) straight to its
+    // drive view, so tapping the push lands you where you can answer (M8).
+    const url = a.instance ? `/?session=${encodeURIComponent(a.instance)}` : "/";
+    sendToAll({ title: a.title, body: a.body, tag: a.tag, url })
       .then((r) => {
         if (r.sent || r.pruned) {
           console.log(`[bifrost] alert ${a.id} → ${r.sent} sent, ${r.pruned} pruned`);
