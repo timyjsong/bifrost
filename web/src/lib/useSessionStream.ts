@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import type { InteractionState } from "../../../shared/types";
+import type { InteractionState, PaneState } from "../../../shared/types";
 import { sseStream } from "./api";
+import { getPane } from "./drive";
 
 export interface SessionStreamState {
   state: InteractionState | null;
@@ -53,4 +54,34 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
   }, [sessionId]);
 
   return { state, connected };
+}
+
+/**
+ * Poll the live pane (Channel 3) while the drive view is open — the pending
+ * permission menu isn't in the transcript, so it needs its own read. A short
+ * interval is fine: approvals aren't sub-second and capture-pane is cheap.
+ */
+export function usePaneState(
+  sessionId: string | null,
+  intervalMs = 1500,
+): PaneState | null {
+  const [pane, setPane] = useState<PaneState | null>(null);
+  useEffect(() => {
+    if (!sessionId) {
+      setPane(null);
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      const p = await getPane(sessionId);
+      if (alive && p) setPane(p);
+    };
+    void tick();
+    const t = setInterval(tick, intervalMs);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [sessionId, intervalMs]);
+  return pane;
 }

@@ -1,4 +1,5 @@
 import { apiFetch } from "./api";
+import type { PaneState } from "../../../shared/types";
 
 /**
  * The warn-and-allow gate for prompting a session (AC3.5). Pure, so the contract
@@ -64,6 +65,33 @@ export async function interrupt(sessionId: string): Promise<SendResult> {
   try {
     const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/interrupt`, {
       method: "POST",
+    });
+    if (r.ok) return { ok: true };
+    const j = (await r.json().catch(() => ({}))) as { reason?: string };
+    return { ok: false, reason: j.reason ?? `http ${r.status}` };
+  } catch (e) {
+    return { ok: false, reason: (e as Error).message };
+  }
+}
+
+/** Read the live pane state (pending permission menu + raw tail for fallback). */
+export async function getPane(sessionId: string): Promise<PaneState | null> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/pane`);
+    if (!r.ok) return null;
+    return (await r.json()) as PaneState;
+  } catch {
+    return null;
+  }
+}
+
+/** Answer a permission menu (a digit, or "Enter" for the default). */
+export async function answer(sessionId: string, key: string): Promise<SendResult> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/answer`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key }),
     });
     if (r.ok) return { ok: true };
     const j = (await r.json().catch(() => ({}))) as { reason?: string };

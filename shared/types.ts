@@ -142,6 +142,20 @@ export interface InteractionState {
   messages: InteractionMessage[];
 }
 
+// Channel 3 — ephemeral pane state (a pending permission menu), read live via
+// capture-pane. `menu` is null when none is detected; `raw` is a pane tail for
+// the loud fallback when a prompt seems active but couldn't be parsed.
+export interface PermissionMenu {
+  prompt: string;
+  options: { key: string; label: string }[];
+}
+
+export interface PaneState {
+  drivable: boolean; // the session is tmux-resident (can be answered)
+  menu: PermissionMenu | null;
+  raw: string;
+}
+
 export interface Snapshot {
   generatedAt: number;
   bundleId?: number; // dist/index.html mtime — frontend reloads when it changes

@@ -6,8 +6,15 @@ import type {
   SessionInfo,
 } from "../../../shared/types";
 import { basename, tildify } from "../lib/format";
-import { useSessionStream } from "../lib/useSessionStream";
-import { promptGate, sendPrompt, getDraft, saveDraft, interrupt } from "../lib/drive";
+import { useSessionStream, usePaneState } from "../lib/useSessionStream";
+import {
+  promptGate,
+  sendPrompt,
+  getDraft,
+  saveDraft,
+  interrupt,
+  answer,
+} from "../lib/drive";
 import { Dot } from "./ui";
 
 /** A one-line summary of a tool call's input, best-effort across tool shapes. */
@@ -118,6 +125,7 @@ export function DriveView({
   onClose: () => void;
 }) {
   const { state, connected } = useSessionStream(session.sessionId);
+  const pane = usePaneState(session.sessionId);
   const bottomRef = useRef<HTMLDivElement>(null);
   const msgCount = state?.messages.length ?? 0;
 
@@ -199,6 +207,12 @@ export function DriveView({
     if (!res.ok) setError(res.reason ?? "interrupt failed");
   };
 
+  const answerMenu = async (key: string) => {
+    setError(null);
+    const res = await answer(session.sessionId, key);
+    if (!res.ok) setError(res.reason ?? "answer failed");
+  };
+
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-bg">
       <header className="flex items-center gap-3 border-b border-line-soft bg-bg/90 px-4 py-3 backdrop-blur-md">
@@ -249,6 +263,33 @@ export function DriveView({
 
       <footer className="border-t border-line-soft bg-bg/90 px-4 py-3">
         <div className="mx-auto w-full max-w-4xl">
+          {pane?.menu && (
+            <div className="mb-3 rounded-md border border-danger/40 bg-danger/[0.06] p-3">
+              <div className="mb-2 text-[12.5px] text-ink">{pane.menu.prompt}</div>
+              <div className="flex flex-wrap gap-2">
+                {pane.menu.options.map((o) => (
+                  <button
+                    key={o.key}
+                    onClick={() => void answerMenu(o.key)}
+                    className="rounded-md border border-line bg-panel-raised px-3 py-1.5 text-[12.5px] text-ink-dim transition-colors hover:border-gold-dim/60 hover:text-gold"
+                  >
+                    <span className="font-mono text-ink-mute">{o.key}</span> {o.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {!pane?.menu && session.state === "approval" && pane?.drivable && (
+            <div className="mb-3 rounded-md border border-gold-dim/50 bg-gold/[0.05] p-3">
+              <div className="mb-1.5 text-[11.5px] text-gold">
+                ⚠ a permission prompt looks active, but Bifrost couldn't read the
+                menu — answer in the raw terminal, or type your choice below.
+              </div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[10.5px] leading-snug text-ink-mute">
+                {pane.raw}
+              </pre>
+            </div>
+          )}
           {gate.canSend ? (
             <>
               {session.state === "working" && (

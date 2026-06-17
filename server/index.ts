@@ -27,7 +27,8 @@ import {
 import { transcriptPathFor } from "./collectors/sessions";
 import { sessionStream } from "./drive/live";
 import { resolveTarget, liveTmuxSet } from "./drive/target";
-import { sendText, sendKey } from "./drive/send";
+import { sendText, sendKey, capturePane } from "./drive/send";
+import { parsePermissionMenu, isValidAnswerKey } from "./drive/menu";
 import { getDraft, setDraft } from "./drive/drafts";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import { handleFilesRequest } from "./files/handler";
@@ -443,6 +444,42 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
     try {
       await sendKey(tgt.tmuxSession, "Escape");
+    } catch {
+      return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
+    }
+    return Response.json({ ok: true });
+  }
+  // Channel 3 — read the live pane for a pending permission menu (+ a raw tail for
+  // the loud fallback when the menu can't be parsed). Polled by the drive view.
+  const paneMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/pane$/);
+  if (paneMatch && req.method === "GET") {
+    const sid = decodeURIComponent(paneMatch[1]);
+    const sess = snapshot.sessions.find((s) => s.sessionId === sid);
+    const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
+    if (!tgt.ok) return Response.json({ drivable: false, menu: null, raw: "" });
+    let raw = "";
+    try {
+      raw = await capturePane(tgt.tmuxSession);
+    } catch {
+      /* pane vanished between resolve and capture */
+    }
+    const tail = raw.split("\n").filter((l) => l.trim()).slice(-30).join("\n");
+    return Response.json({ drivable: true, menu: parsePermissionMenu(raw), raw: tail });
+  }
+  // Answer a permission menu — a deliberately tiny surface (a digit or Enter),
+  // validated, then routed as a key. A bad key is rejected, never sent.
+  const answerMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/answer$/);
+  if (answerMatch && req.method === "POST") {
+    const sid = decodeURIComponent(answerMatch[1]);
+    const body = (await req.json().catch(() => ({}))) as { key?: unknown };
+    const key = typeof body.key === "string" ? body.key : "";
+    if (!isValidAnswerKey(key))
+      return Response.json({ ok: false, reason: "bad-key" }, { status: 400 });
+    const sess = snapshot.sessions.find((s) => s.sessionId === sid);
+    const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
+    if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
+    try {
+      await sendKey(tgt.tmuxSession, key);
     } catch {
       return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
     }

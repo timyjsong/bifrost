@@ -59,3 +59,15 @@ export async function sendText(
 export async function sendKey(target: string, key: string): Promise<void> {
   await tmux(["send-keys", "-t", target, key]);
 }
+
+/** Read the visible content of a pane (Channel 3 — ephemeral TUI state not in
+ *  the transcript, e.g. a pending permission menu). Read-only. */
+export async function capturePane(target: string): Promise<string> {
+  const proc = Bun.spawn(["tmux", "capture-pane", "-p", "-t", target], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out;
+}
