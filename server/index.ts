@@ -485,6 +485,22 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     }
     return Response.json({ ok: true });
   }
+  // Raw pane mirror (M6) — the full pane WITH colour escapes, for the xterm.js
+  // fallback. Polled by the raw terminal view.
+  const captureMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/capture$/);
+  if (captureMatch && req.method === "GET") {
+    const sid = decodeURIComponent(captureMatch[1]);
+    const sess = snapshot.sessions.find((s) => s.sessionId === sid);
+    const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
+    if (!tgt.ok) return Response.json({ text: "" });
+    let text = "";
+    try {
+      text = await capturePane(tgt.tmuxSession, { escapes: true });
+    } catch {
+      /* pane vanished */
+    }
+    return Response.json({ text });
+  }
   // Cross-device prompt draft: the uncommitted input buffer, server-side per
   // session so it follows the user across devices.
   const draftMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/draft$/);

@@ -61,9 +61,15 @@ export async function sendKey(target: string, key: string): Promise<void> {
 }
 
 /** Read the visible content of a pane (Channel 3 — ephemeral TUI state not in
- *  the transcript, e.g. a pending permission menu). Read-only. */
-export async function capturePane(target: string): Promise<string> {
-  const proc = Bun.spawn(["tmux", "capture-pane", "-p", "-t", target], {
+ *  the transcript, e.g. a pending permission menu). Read-only. With
+ *  `escapes`, includes SGR colour sequences for the xterm.js raw mirror; without,
+ *  plain text for the menu parser. */
+export async function capturePane(
+  target: string,
+  opts: { escapes?: boolean } = {},
+): Promise<string> {
+  const args = ["capture-pane", ...(opts.escapes ? ["-e"] : []), "-p", "-t", target];
+  const proc = Bun.spawn(["tmux", ...args], {
     stdout: "pipe",
     stderr: "ignore",
   });

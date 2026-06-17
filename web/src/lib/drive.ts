@@ -101,6 +101,17 @@ export async function answer(sessionId: string, key: string): Promise<SendResult
   }
 }
 
+/** Full pane content (with colour escapes) for the xterm.js raw mirror. */
+export async function getCapture(sessionId: string): Promise<string | null> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/capture`);
+    if (!r.ok) return null;
+    return ((await r.json()) as { text?: string }).text ?? "";
+  } catch {
+    return null;
+  }
+}
+
 export async function getDraft(sessionId: string): Promise<string> {
   try {
     const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/draft`);

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type {
   ContentBlock,
   InteractionMessage,
@@ -16,6 +16,12 @@ import {
   answer,
 } from "../lib/drive";
 import { Dot } from "./ui";
+
+// Lazy — xterm.js is heavy and only needed when the raw view is opened, so it
+// code-splits out of the main bundle (keeps the PWA's first load lean).
+const RawTerminal = lazy(() =>
+  import("./RawTerminal").then((m) => ({ default: m.RawTerminal })),
+);
 
 /** A one-line summary of a tool call's input, best-effort across tool shapes. */
 function toolSummary(input: unknown): string {
@@ -134,6 +140,7 @@ export function DriveView({
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null); // optimistic echo
   const [interrupting, setInterrupting] = useState(false);
+  const [rawOpen, setRawOpen] = useState(false);
   const pendingBase = useRef(0); // user-prompt count at send time
   const skipSave = useRef(true); // don't persist the freshly-loaded draft back
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -232,12 +239,32 @@ export function DriveView({
             {session.tmuxSession ? ` · tmux ${session.tmuxSession}` : ""}
           </div>
         </div>
-        <div className="ml-auto flex shrink-0 items-center gap-1.5 text-[11px] text-ink-mute">
-          <Dot tone={connected ? "gold" : "danger"} pulse={connected} />
-          {connected ? "live" : "reconnecting…"}
+        <div className="ml-auto flex shrink-0 items-center gap-2.5">
+          <button
+            onClick={() => setRawOpen((v) => !v)}
+            className="rounded-md border border-line px-2 py-1 text-[11px] text-ink-dim transition-colors hover:bg-panel-raised hover:text-ink"
+            title={rawOpen ? "back to the rendered view" : "raw terminal mirror"}
+          >
+            {rawOpen ? "chat" : "raw"}
+          </button>
+          <span className="flex items-center gap-1.5 text-[11px] text-ink-mute">
+            <Dot tone={connected ? "gold" : "danger"} pulse={connected} />
+            {connected ? "live" : "reconnecting…"}
+          </span>
         </div>
       </header>
 
+      {rawOpen ? (
+        <div className="flex-1 overflow-hidden bg-[#0a0a0a] p-2">
+          <Suspense
+            fallback={
+              <div className="p-4 text-[12px] text-ink-mute">loading terminal…</div>
+            }
+          >
+            <RawTerminal sessionId={session.sessionId} />
+          </Suspense>
+        </div>
+      ) : (
       <div className="mx-auto w-full max-w-4xl flex-1 space-y-4 overflow-y-auto px-4 py-5">
         {state === null && (
           <div className="pt-10 text-center text-[12px] text-ink-mute">loading…</div>
@@ -260,6 +287,7 @@ export function DriveView({
         )}
         <div ref={bottomRef} />
       </div>
+      )}
 
       <footer className="border-t border-line-soft bg-bg/90 px-4 py-3">
         <div className="mx-auto w-full max-w-4xl">
