@@ -27,7 +27,7 @@ import {
 import { transcriptPathFor } from "./collectors/sessions";
 import { sessionStream } from "./drive/live";
 import { resolveTarget, liveTmuxSet } from "./drive/target";
-import { sendText } from "./drive/send";
+import { sendText, sendKey } from "./drive/send";
 import { getDraft, setDraft } from "./drive/drafts";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import { handleFilesRequest } from "./files/handler";
@@ -430,6 +430,22 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       );
     }
     await setDraft(sid, ""); // committed — clear the cross-device draft
+    return Response.json({ ok: true });
+  }
+  // Interrupt a running turn (M4). Sends Esc — never Ctrl-C (which would exit the
+  // session). The UI only exposes this while the session is working, so it can't
+  // be mis-fired when there's nothing to stop.
+  const interruptMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/interrupt$/);
+  if (interruptMatch && req.method === "POST") {
+    const sid = decodeURIComponent(interruptMatch[1]);
+    const sess = snapshot.sessions.find((s) => s.sessionId === sid);
+    const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
+    if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
+    try {
+      await sendKey(tgt.tmuxSession, "Escape");
+    } catch {
+      return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
+    }
     return Response.json({ ok: true });
   }
   // Cross-device prompt draft: the uncommitted input buffer, server-side per

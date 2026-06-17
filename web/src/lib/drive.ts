@@ -58,6 +58,21 @@ export async function sendPrompt(sessionId: string, text: string): Promise<SendR
   }
 }
 
+/** Interrupt a running turn (sends Esc server-side). Only fired by the stop
+ *  button, which the drive view shows solely while the session is working. */
+export async function interrupt(sessionId: string): Promise<SendResult> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/interrupt`, {
+      method: "POST",
+    });
+    if (r.ok) return { ok: true };
+    const j = (await r.json().catch(() => ({}))) as { reason?: string };
+    return { ok: false, reason: j.reason ?? `http ${r.status}` };
+  } catch (e) {
+    return { ok: false, reason: (e as Error).message };
+  }
+}
+
 export async function getDraft(sessionId: string): Promise<string> {
   try {
     const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/draft`);

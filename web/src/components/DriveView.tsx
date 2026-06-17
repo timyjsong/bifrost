@@ -7,7 +7,7 @@ import type {
 } from "../../../shared/types";
 import { basename, tildify } from "../lib/format";
 import { useSessionStream } from "../lib/useSessionStream";
-import { promptGate, sendPrompt, getDraft, saveDraft } from "../lib/drive";
+import { promptGate, sendPrompt, getDraft, saveDraft, interrupt } from "../lib/drive";
 import { Dot } from "./ui";
 
 /** A one-line summary of a tool call's input, best-effort across tool shapes. */
@@ -125,6 +125,7 @@ export function DriveView({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null); // optimistic echo
+  const [interrupting, setInterrupting] = useState(false);
   const pendingBase = useRef(0); // user-prompt count at send time
   const skipSave = useRef(true); // don't persist the freshly-loaded draft back
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -189,6 +190,15 @@ export function DriveView({
     }
   };
 
+  const stop = async () => {
+    if (interrupting) return;
+    setInterrupting(true);
+    setError(null);
+    const res = await interrupt(session.sessionId);
+    setInterrupting(false);
+    if (!res.ok) setError(res.reason ?? "interrupt failed");
+  };
+
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-bg">
       <header className="flex items-center gap-3 border-b border-line-soft bg-bg/90 px-4 py-3 backdrop-blur-md">
@@ -241,6 +251,17 @@ export function DriveView({
         <div className="mx-auto w-full max-w-4xl">
           {gate.canSend ? (
             <>
+              {session.state === "working" && (
+                <div className="mb-2 flex justify-center">
+                  <button
+                    onClick={() => void stop()}
+                    disabled={interrupting}
+                    className="rounded-md border border-danger/50 bg-danger/10 px-4 py-1.5 text-[12.5px] font-medium text-danger transition-colors hover:bg-danger/20 disabled:opacity-50"
+                  >
+                    {interrupting ? "stopping…" : "■ stop"}
+                  </button>
+                </div>
+              )}
               {gate.warning && (
                 <div className="mb-1.5 text-[11px] text-gold/90">⚠ {gate.warning}</div>
               )}
