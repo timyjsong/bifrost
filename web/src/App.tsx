@@ -9,6 +9,7 @@ import { ProjectsPane } from "./components/ProjectsPane";
 import { SystemPane } from "./components/SystemPane";
 import { AlertsPane } from "./components/AlertsPane";
 import { Enroll } from "./components/Enroll";
+import { DriveView } from "./components/DriveView";
 import { getToken, AUTH_LOST_EVENT } from "./lib/api";
 
 function scrollTop() {
@@ -209,6 +210,16 @@ function Dashboard() {
   const onNav = (id: string) => {
     if (id === "projects") setBrowsePath(null);
   };
+  // The open live drive view (Build 1). Lifted here so it overlays the whole
+  // dashboard; closes itself if the session it points at ends.
+  const [driveSessionId, setDriveSessionId] = useState<string | null>(null);
+  const driveSession =
+    snap?.sessions.find((s) => s.sessionId === driveSessionId) ?? null;
+  useEffect(() => {
+    if (driveSessionId && snap?.generatedAt && !driveSession) {
+      setDriveSessionId(null); // the session ended — drop back to the dashboard
+    }
+  }, [driveSessionId, driveSession, snap?.generatedAt]);
   // Open on the Sessions pane (before paint, so no flash of Projects). No-op on
   // desktop (block layout — scrollLeft clamps to 0, top of the stack shows).
   useLayoutEffect(() => {
@@ -249,7 +260,12 @@ function Dashboard() {
       label: "Sessions",
       alert: needsYou,
       node: (
-        <SessionsPane sessions={snap.sessions} now={now} summarize={snap.summarize} />
+        <SessionsPane
+          sessions={snap.sessions}
+          now={now}
+          summarize={snap.summarize}
+          onOpenDrive={setDriveSessionId}
+        />
       ),
     },
     { id: "system", label: "System", alert: 0, node: <SystemPane system={snap.system} now={now} /> },
@@ -275,6 +291,12 @@ function Dashboard() {
 
   return (
     <div className="min-h-screen">
+      {driveSession && (
+        <DriveView
+          session={driveSession}
+          onClose={() => setDriveSessionId(null)}
+        />
+      )}
       <Rail
         connected={connected}
         host={sys.hostname}

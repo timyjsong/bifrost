@@ -13,6 +13,7 @@ export interface SessionsViewProps {
   summarize: Snapshot["summarize"];
   isWide: boolean;
   filtersActive: boolean; // some sessions may be hidden by the filter bar
+  onOpenDrive: (sessionId: string) => void; // open the live drive view for a session
 }
 
 export interface SessionsViewDef {

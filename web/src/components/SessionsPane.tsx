@@ -40,10 +40,12 @@ export function SessionsPane({
   sessions,
   now,
   summarize,
+  onOpenDrive,
 }: {
   sessions: SessionInfo[];
   now: number;
   summarize: Snapshot["summarize"];
+  onOpenDrive: (sessionId: string) => void;
 }) {
   const isWide = useIsWide();
   const [viewId, setViewId] = useState(
@@ -104,6 +106,7 @@ export function SessionsPane({
         summarize={summarize}
         isWide={isWide}
         filtersActive={filtered.length < live.length}
+        onOpenDrive={onOpenDrive}
       />
     </section>
   );

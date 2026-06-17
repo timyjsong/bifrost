@@ -210,10 +210,12 @@ function LiveCard({
   s,
   now,
   queueStatus,
+  onOpen,
 }: {
   s: SessionInfo;
   now: number;
   queueStatus: QueueStatus;
+  onOpen: () => void;
 }) {
   const needsYou = s.state === "awaiting" || s.state === "approval";
   return (
@@ -234,9 +236,13 @@ function LiveCard({
           className={`absolute bottom-3 left-0 top-3 w-[2px] rounded-full ${STRIPE_CLASSES[stateStripe(s)]}`}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate text-[15px] font-medium leading-tight text-ink">
+          <button
+            onClick={onOpen}
+            title="open the live session"
+            className="truncate text-left text-[15px] font-medium leading-tight text-ink transition-colors hover:text-gold"
+          >
             {s.customTitle ?? (basename(s.cwd) || s.cwd)}
-          </span>
+          </button>
           <StateBadge s={s} now={now} />
           <span className="ml-auto flex items-center gap-2">
             {s.model && <ModelBadge model={s.model} />}
@@ -332,6 +338,7 @@ export function CardsView({
   summarize,
   isWide,
   filtersActive,
+  onOpenDrive,
 }: SessionsViewProps) {
   const { needsYou, working, liveHeadless } = groups;
   const cols = isWide ? 2 : 1;
@@ -349,6 +356,7 @@ export function CardsView({
                 s={s}
                 now={now}
                 queueStatus={queueStatusOf(s.sessionId, summarize)}
+                onOpen={() => onOpenDrive(s.sessionId)}
               />
             ))}
           </AnimatePresence>

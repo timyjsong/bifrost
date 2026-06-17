@@ -25,6 +25,7 @@ import {
   taskOwnerFromLink,
 } from "./tasknames";
 import { transcriptPathFor } from "./collectors/sessions";
+import { sessionStream } from "./drive/live";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import { handleFilesRequest } from "./files/handler";
 import { mutedSessions } from "./alerts/sessions";
@@ -392,6 +393,16 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
   }
   if (url.pathname === "/api/events") {
     return sseResponse(req.headers.get("x-bifrost-token"));
+  }
+  // Per-session live drive stream (Build 1 / M2). The id is only a map key into
+  // the collector's tracked sessions — it never touches the filesystem as a path,
+  // so there's no traversal surface; an unknown session is a 404.
+  const sessMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/events$/);
+  if (sessMatch) {
+    const sid = decodeURIComponent(sessMatch[1]);
+    const tpath = transcriptPathFor(sid);
+    if (!tpath) return new Response("no such session", { status: 404 });
+    return sessionStream(sid, tpath, req.headers.get("x-bifrost-token"), verifyToken);
   }
   if (url.pathname === "/api/health") {
     return Response.json({ ok: true, generatedAt: snapshot.generatedAt });

@@ -23,18 +23,21 @@ function Row({
   s,
   now,
   summarize,
+  onOpen,
 }: {
   s: SessionInfo;
   now: number;
   summarize: SessionsViewProps["summarize"];
+  onOpen: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const st = stateLabel(s, now);
   const needsYou = s.state === "awaiting" || s.state === "approval";
   return (
     <div
-      className={`border-b border-line-soft last:border-b-0 ${needsYou ? "bg-gold/[0.04]" : ""}`}
+      className={`flex items-stretch border-b border-line-soft last:border-b-0 ${needsYou ? "bg-gold/[0.04]" : ""}`}
     >
+      <div className="min-w-0 flex-1">
       <button
         onClick={() => setOpen(!open)}
         className="flex w-full items-center gap-3 px-4 py-2 text-left transition-colors hover:bg-panel-raised"
@@ -91,6 +94,15 @@ function Row({
           />
         </div>
       )}
+      </div>
+      <button
+        onClick={onOpen}
+        title="open the live session"
+        aria-label="open the live session"
+        className="shrink-0 border-l border-line-soft px-3 text-[13px] text-ink-mute transition-colors hover:bg-panel-raised hover:text-gold"
+      >
+        →
+      </button>
     </div>
   );
 }
@@ -105,13 +117,20 @@ export function TableView({
   now,
   summarize,
   filtersActive,
+  onOpenDrive,
 }: SessionsViewProps) {
   const { needsYou, working, liveHeadless } = groups;
   const ordered = [...needsYou, ...working];
   return (
     <Panel>
       {ordered.map((s) => (
-        <Row key={s.sessionId} s={s} now={now} summarize={summarize} />
+        <Row
+          key={s.sessionId}
+          s={s}
+          now={now}
+          summarize={summarize}
+          onOpen={() => onOpenDrive(s.sessionId)}
+        />
       ))}
       {ordered.length === 0 && (
         <div className="px-4 py-6 text-center text-[13px] text-ink-mute">

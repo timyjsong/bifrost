@@ -119,6 +119,29 @@ export interface SystemInfo {
   ports: PortInfo[];
 }
 
+// --- Bidirectional drive: normalized interaction state (Build 1 / phases/01) ---
+// A session's transcript reduced to ordered messages + content blocks. Build 1
+// renders it linearly; `isSidechain` preserves the subagent topology so Build 3's
+// background-tasks view can render the tree without a re-parse (epic principle 5).
+export type ContentBlock =
+  | { kind: "thinking"; text: string }
+  | { kind: "text"; text: string }
+  | { kind: "tool_use"; id: string; name: string; input: unknown }
+  | { kind: "tool_result"; forId: string; text: string; isError: boolean };
+
+export interface InteractionMessage {
+  uuid: string;
+  role: "user" | "assistant";
+  isSidechain: boolean; // a subagent turn (topology marker, not flattened away)
+  blocks: ContentBlock[];
+  ts: number; // epoch ms (0 if the entry carried no timestamp)
+}
+
+export interface InteractionState {
+  sessionId: string;
+  messages: InteractionMessage[];
+}
+
 export interface Snapshot {
   generatedAt: number;
   bundleId?: number; // dist/index.html mtime — frontend reloads when it changes
