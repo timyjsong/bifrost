@@ -447,6 +447,11 @@ function Dashboard() {
 export default function App() {
   const [authed, setAuthed] = useState(() => !!getToken());
   useEffect(() => {
+    // Ask the browser not to evict our storage — the device token lives in
+    // localStorage, and an installed PWA silently losing it means a surprise
+    // re-enroll. Best-effort: Chrome honors persist(); Safari/iOS support is
+    // partial, but an installed home-screen PWA already gets durable storage.
+    void navigator.storage?.persist?.();
     const onLost = () => setAuthed(false);
     window.addEventListener(AUTH_LOST_EVENT, onLost);
     return () => window.removeEventListener(AUTH_LOST_EVENT, onLost);

@@ -10,12 +10,14 @@
  * running server on its very next request, no restart needed.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { dataDir, readJson, writeJsonAtomic } from "../alerts/store";
+import { dataDir, writeJsonAtomic } from "../alerts/store";
 
 const FILE = "auth-tokens.json";
+const BAK = `${FILE}.bak`;
 const PATH = join(dataDir, FILE);
+const BAK_PATH = join(dataDir, BAK);
 
 export interface DeviceToken {
   token: string; // base64url, 32 random bytes (256-bit)
@@ -33,16 +35,63 @@ async function fileMtime(): Promise<number> {
   }
 }
 
+type ReadResult =
+  | { kind: "ok"; list: DeviceToken[] }
+  | { kind: "missing" }
+  | { kind: "corrupt" };
+
+// A STRICT read that tells "no file yet" (legitimately empty) apart from
+// "present but unreadable/corrupt". The generic readJson() collapses both to its
+// fallback []; that is the wipe vector — a transient bad read returns [], and the
+// next save() persists [] over a perfectly good store. Here only a genuine ENOENT
+// yields empty; anything else is reported corrupt so load() refuses to clobber.
+async function readList(path: string): Promise<ReadResult> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+    return { kind: "corrupt" };
+  }
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? { kind: "ok", list: v as DeviceToken[] } : { kind: "corrupt" };
+  } catch {
+    return { kind: "corrupt" };
+  }
+}
+
 async function load(): Promise<DeviceToken[]> {
   const mtimeMs = await fileMtime();
   if (cache && cache.mtimeMs === mtimeMs) return cache.list;
-  const list = await readJson<DeviceToken[]>(FILE, []);
-  cache = { mtimeMs, list };
-  return list;
+
+  const main = await readList(PATH);
+  if (main.kind === "ok") {
+    cache = { mtimeMs, list: main.list };
+    return main.list;
+  }
+  // Primary missing or corrupt → recover from the mirror before doing anything.
+  const bak = await readList(BAK_PATH);
+  if (bak.kind === "ok") {
+    await writeJsonAtomic(FILE, bak.list); // self-heal the primary from the backup
+    cache = { mtimeMs: await fileMtime(), list: bak.list };
+    return bak.list;
+  }
+  if (main.kind === "missing") {
+    cache = { mtimeMs, list: [] }; // genuine first run — no primary, no backup
+    return [];
+  }
+  // Corrupt primary AND no usable backup: fail closed. Throwing makes callers
+  // 500 (the client keeps its token) and, crucially, never reach a save([]) — so
+  // a bad read can't cascade into a wipe of every enrolled device.
+  throw new Error(
+    "auth-tokens.json is corrupt and no valid backup exists — refusing to operate",
+  );
 }
 
 async function save(list: DeviceToken[]): Promise<void> {
   await writeJsonAtomic(FILE, list);
+  await writeJsonAtomic(BAK, list); // mirror for corruption/loss recovery
   cache = { mtimeMs: await fileMtime(), list };
 }
 
