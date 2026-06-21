@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { promptGate, filterSlash } from "./drive";
+import { promptGate, filterSlash, reconcileDraft } from "./drive";
 import type { SlashCommand } from "../../../shared/types";
 
 const CMDS: SlashCommand[] = [
@@ -52,5 +52,41 @@ describe("filterSlash — the suggester (AC7)", () => {
   test("does not suggest for non-slash input", () => {
     expect(filterSlash("hello", CMDS)).toEqual([]);
     expect(filterSlash("", CMDS)).toEqual([]);
+  });
+});
+
+describe("reconcileDraft — live cross-device sync", () => {
+  test("a remote edit (differs from baseline + box) is adopted", () => {
+    // typed on the desktop; this device's box/baseline still hold the old value
+    const r = reconcileDraft({ local: "old", lastSynced: "old", remote: "from desktop" });
+    expect(r).toEqual({ adopt: true, value: "from desktop", baseline: "from desktop" });
+  });
+
+  test("no remote change (remote === baseline) keeps un-saved local keystrokes", () => {
+    // user is mid-type: box ahead of the server, but the server hasn't changed
+    const r = reconcileDraft({ local: "hello wor", lastSynced: "hello", remote: "hello" });
+    expect(r.adopt).toBe(false);
+    expect(r.value).toBe("hello wor");
+    expect(r.baseline).toBe("hello"); // baseline unmoved — no remote edit happened
+  });
+
+  test("remote already equals the box: don't touch it, just advance the baseline", () => {
+    // our own debounced save landed; the poll now sees it
+    const r = reconcileDraft({ local: "synced", lastSynced: "older", remote: "synced" });
+    expect(r.adopt).toBe(false);
+    expect(r.baseline).toBe("synced");
+  });
+
+  test("a remote clear (send fired elsewhere) clears this device's box", () => {
+    const r = reconcileDraft({ local: "draft", lastSynced: "draft", remote: "" });
+    expect(r).toEqual({ adopt: true, value: "", baseline: "" });
+  });
+
+  test("steady state (all three equal) is a no-op", () => {
+    expect(reconcileDraft({ local: "x", lastSynced: "x", remote: "x" })).toEqual({
+      adopt: false,
+      value: "x",
+      baseline: "x",
+    });
   });
 });

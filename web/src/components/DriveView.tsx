@@ -10,14 +10,18 @@ import { basename, tildify } from "../lib/format";
 import { useSessionStream, usePaneState } from "../lib/useSessionStream";
 import {
   promptGate,
-  sendPrompt,
+  schedulePrompt,
+  cancelPrompt,
   getDraft,
   saveDraft,
+  reconcileDraft,
   interrupt,
   answer,
   getSlashCommands,
   filterSlash,
 } from "../lib/drive";
+import { resolveKey } from "../lib/keymap";
+import { fetchSettings } from "../lib/settings";
 import { Dot } from "./ui";
 
 // Lazy — xterm.js is heavy and only needed when the raw view is opened, so it
@@ -144,28 +148,67 @@ export function DriveView({
   const [pending, setPending] = useState<string | null>(null); // optimistic echo
   const [interrupting, setInterrupting] = useState(false);
   const [rawOpen, setRawOpen] = useState(false);
+  // Send grace buffer: while a submitted prompt is parked (server-side), graceUntil
+  // holds its fire timestamp; null once it has fired (or there's nothing parked).
+  const [graceUntil, setGraceUntil] = useState<number | null>(null);
+  const [delayMs, setDelayMs] = useState(3000); // grace duration, from settings
+  const [, forceTick] = useState(0); // re-render the live countdown while in grace
   // Optimistic send↔stop: flips instantly on the user's click, then hands off to
   // the real pane "working" reading (ground truth, like the TUI). Because the pane
   // is accurate — not a laggy derived guess — it can't flip back.
   const [optimistic, setOptimistic] = useState<boolean | null>(null);
   const pendingBase = useRef(0); // user-prompt count at send time
-  const skipSave = useRef(true); // don't persist the freshly-loaded draft back
+  const skipSave = useRef(true); // don't persist the freshly-loaded/adopted draft back
+  const lastSynced = useRef(""); // last draft value this device PUT or adopted (sync baseline)
+  const textRef = useRef(text); // latest text, so the draft poll needn't reset on each keystroke
+  textRef.current = text;
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [slashCmds, setSlashCmds] = useState<SlashCommand[]>([]);
 
   const gate = promptGate(session);
   const suggestions = filterSlash(text, slashCmds);
-  // A turn is in flight → send becomes stop, input disabled (no queueing). Read
-  // straight from the live pane (the same source as the TUI); the optimistic flip
-  // wins only until the pane confirms it.
+  // The send signal is SERVER-authoritative (the pane endpoint, polled by every
+  // device): `working` = the main turn is in flight (control not yours yet);
+  // `pane.pendingSend` = a send is parked server-side in its grace window. The
+  // optimistic flip just hides this device's own poll latency until the pane
+  // confirms. Send is disabled while busy; typing stays allowed throughout (only
+  // this device's own grace window locks the box, so cancel can restore cleanly).
   const paneWorking = pane?.working ?? false;
-  const working = optimistic ?? paneWorking;
+  const working = optimistic ?? paneWorking; // main turn active (any device)
+  const inGrace = graceUntil !== null; // my own parked send
+  const pendingRemote = (pane?.pendingSend ?? false) && !inGrace; // another device's
+  const busy = working || inGrace || pendingRemote; // send unavailable
+  const showStop = !inGrace && working; // stop=interrupt only while a turn runs
+  const graceLeft = graceUntil ? Math.max(0, Math.ceil((graceUntil - Date.now()) / 1000)) : 0;
 
   // Slash-command list for the suggester (disk-scanned server-side, fetched once).
   useEffect(() => {
     void getSlashCommands(session.sessionId).then(setSlashCmds);
   }, [session.sessionId]);
+
+  // The configured grace period — the client mirrors the server's value so the
+  // countdown and the real fire timer agree (both read the same stored setting).
+  useEffect(() => {
+    void fetchSettings().then((s) => setDelayMs(s.sendDelayMs));
+  }, []);
+
+  // When the grace window elapses, the server has injected the parked send — flip
+  // the UI to "working". A backstop, since this drives input-lock state. Re-armed
+  // whenever graceUntil changes (a fresh submit, or cleared on cancel).
+  useEffect(() => {
+    if (graceUntil === null) return;
+    const ms = Math.max(0, graceUntil - Date.now());
+    const fired = setTimeout(() => {
+      setGraceUntil(null);
+      setOptimistic(true); // it fired server-side → now running
+    }, ms);
+    const ticker = setInterval(() => forceTick((n) => n + 1), 250); // live countdown
+    return () => {
+      clearTimeout(fired);
+      clearInterval(ticker);
+    };
+  }, [graceUntil]);
 
   const pickSlash = (name: string) => {
     setText(name + " "); // fill, don't send — args can follow
@@ -193,6 +236,7 @@ export function DriveView({
     void getDraft(session.sessionId).then((d) => {
       if (alive) {
         skipSave.current = true;
+        lastSynced.current = d; // baseline: what the server holds right now
         setText(d);
       }
     });
@@ -208,11 +252,43 @@ export function DriveView({
       return;
     }
     if (draftTimer.current) clearTimeout(draftTimer.current);
-    draftTimer.current = setTimeout(() => void saveDraft(session.sessionId, text), 500);
+    const t = text;
+    draftTimer.current = setTimeout(() => {
+      lastSynced.current = t; // our edit IS now the server's value (last-write-wins)
+      void saveDraft(session.sessionId, t);
+    }, 500);
     return () => {
       if (draftTimer.current) clearTimeout(draftTimer.current);
     };
   }, [text, session.sessionId]);
+
+  // Live cross-device sync (receive side): poll the server draft and ADOPT edits
+  // made on another device. reconcileDraft only adopts when the server value
+  // differs from BOTH our baseline and the box — so it never clobbers keystrokes
+  // we haven't saved yet. Latency-tolerant (1s); the box being disabled mid-grace
+  // doesn't matter, we only read here.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      const remote = await getDraft(session.sessionId);
+      if (!alive) return;
+      const r = reconcileDraft({
+        local: textRef.current,
+        lastSynced: lastSynced.current,
+        remote,
+      });
+      lastSynced.current = r.baseline;
+      if (r.adopt) {
+        skipSave.current = true; // came from the server — don't echo it back
+        setText(r.value);
+      }
+    };
+    const t = setInterval(tick, 1000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [session.sessionId]);
 
   // Reconcile the optimistic echo: once the transcript shows the new prompt
   // (the user-prompt count grew past the send-time base), drop the echo so the
@@ -235,34 +311,59 @@ export function DriveView({
     return () => clearTimeout(t);
   }, [optimistic]);
 
-  // A different session opened — drop any stale optimistic flip.
-  useEffect(() => setOptimistic(null), [session.sessionId]);
+  // A different session opened — drop any stale optimistic flip and grace window
+  // (a send parked for the previous session still fires server-side; the UI just
+  // stops tracking it here).
+  useEffect(() => {
+    setOptimistic(null);
+    setGraceUntil(null);
+    setPending(null);
+  }, [session.sessionId]);
 
-  const send = async () => {
+  const submit = async () => {
     const t = text.trim();
-    if (!gate.canSend || working || !t || sending) return;
+    if (!gate.canSend || busy || sending || !t) return;
     setSending(true);
     setError(null);
     pendingBase.current = userPromptCount(state);
-    setPending(t); // optimistic echo
-    setOptimistic(true); // flip to stop immediately
-    skipSave.current = true; // server clears the draft on send
+    setPending(t); // echo bubble
+    skipSave.current = true; // server clears the draft when the send fires
     setText("");
-    const res = await sendPrompt(session.sessionId, t);
+    setGraceUntil(Date.now() + delayMs); // open the grace window (locks input)
+    const res = await schedulePrompt(session.sessionId, t);
     setSending(false);
     if (!res.ok) {
-      // revert the optimism, restore the draft, surface the failure loud
+      // never parked — revert everything and surface the failure loud
       setPending(null);
-      setOptimistic(null);
+      setGraceUntil(null);
+      skipSave.current = true;
       setText(t);
       setError(res.reason ?? "send failed");
     }
   };
 
+  // Stop does double duty: within the grace window it CANCELS the parked send
+  // (undo — text returns); once the turn is running it INTERRUPTS (Esc).
   const stop = async () => {
+    if (inGrace) {
+      const parked = pending;
+      setGraceUntil(null);
+      const res = await cancelPrompt(session.sessionId);
+      if (res.cancelled) {
+        setPending(null);
+        if (parked) {
+          skipSave.current = true; // still the server draft — don't re-save
+          setText(parked);
+        }
+      } else {
+        setOptimistic(true); // raced past cancel — it sent; let it run
+      }
+      return;
+    }
+    if (!working) return; // nothing running to interrupt (idle / another device's send)
     if (interrupting) return;
     setInterrupting(true);
-    setOptimistic(false); // flip to send immediately
+    setOptimistic(false); // flip toward send immediately
     setError(null);
     const res = await interrupt(session.sessionId);
     setInterrupting(false);
@@ -277,6 +378,32 @@ export function DriveView({
     const res = await answer(session.sessionId, key);
     if (!res.ok) setError(res.reason ?? "answer failed");
   };
+
+  // The keymap lives at the VIEW level, not on the textarea — so a chord still
+  // works while input is locked during the grace window (a disabled textarea gets
+  // no key events). A ref carries the latest handlers so the listener stays stable
+  // (mounted once) yet never reads stale state. enter→newline is a no-op here
+  // (we don't preventDefault), so the textarea's native newline still happens.
+  const keymap = useRef({ submit, stop, onClose, rawOpen });
+  keymap.current = { submit, stop, onClose, rawOpen };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const action = resolveKey(e);
+      if (!action || action === "newline") return;
+      if (action === "close") {
+        e.preventDefault();
+        keymap.current.onClose();
+        return;
+      }
+      // submit/stop only act on the chat compose flow, not the raw mirror.
+      if (keymap.current.rawOpen) return;
+      e.preventDefault();
+      if (action === "submit") void keymap.current.submit();
+      else if (action === "stop") void keymap.current.stop();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-bg">
@@ -339,7 +466,9 @@ export function DriveView({
           <div className="flex justify-end">
             <div className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm border border-gold-dim/30 bg-gold/[0.04] px-3.5 py-2 text-[13.5px] leading-relaxed text-ink/70">
               {pending}
-              <span className="ml-2 align-middle text-[10px] text-ink-mute">sending…</span>
+              <span className="ml-2 align-middle text-[10px] text-ink-mute">
+                {inGrace ? `sending in ${graceLeft}s · ⌥⏎ to cancel` : "sending…"}
+              </span>
             </div>
           </div>
         )}
@@ -406,40 +535,55 @@ export function DriveView({
                   <textarea
                     ref={taRef}
                     value={text}
-                    disabled={working}
+                    // Only MY grace window locks the box (so cancel can restore the
+                    // sent text). While a turn runs you can keep composing — send is
+                    // what's gated, not typing.
+                    disabled={inGrace}
                     onChange={(e) => setText(e.target.value)}
                     onKeyDown={(e) => {
+                      // Only the slash-accept lives here; submit/stop/close are
+                      // handled view-wide by the keymap effect (works even when
+                      // this textarea is disabled). enter→newline falls through.
                       if (e.key === "Tab" && suggestions.length > 0) {
                         e.preventDefault();
                         pickSlash(suggestions[0].name); // accept the top suggestion
-                        return;
-                      }
-                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                        e.preventDefault();
-                        void send();
                       }
                     }}
                     rows={2}
                     placeholder={
-                      working
-                        ? "running — stop to interrupt"
-                        : "message this session…  (⌘/Ctrl+Enter to send · / for commands)"
+                      inGrace
+                        ? "sending… ⌥⏎ (alt+enter) to cancel"
+                        : working
+                          ? "running — compose your next message · ⌥⏎ to interrupt"
+                          : pendingRemote
+                            ? "a send is in flight on another device…"
+                            : "message this session…  (⌘/Ctrl+Enter to send · enter for newline · / for commands)"
                     }
                     className="max-h-40 min-h-[40px] flex-1 resize-y rounded-md border border-line bg-panel px-3 py-2 text-[13px] text-ink placeholder:text-ink-mute/60 focus:border-gold-dim/60 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                   />
-                  {working ? (
+                  {inGrace ? (
+                    <button
+                      onClick={() => void stop()}
+                      className="shrink-0 rounded-md border border-danger/50 bg-danger/10 px-3.5 py-2 text-[13px] font-medium text-danger transition-colors hover:bg-danger/20"
+                      title="cancel the send (alt+enter)"
+                    >
+                      cancel · {graceLeft}s
+                    </button>
+                  ) : showStop ? (
                     <button
                       onClick={() => void stop()}
                       disabled={interrupting}
                       className="shrink-0 rounded-md border border-danger/50 bg-danger/10 px-3.5 py-2 text-[13px] font-medium text-danger transition-colors hover:bg-danger/20 disabled:opacity-50"
+                      title="interrupt (alt+enter)"
                     >
                       {interrupting ? "…" : "■ stop"}
                     </button>
                   ) : (
                     <button
-                      onClick={() => void send()}
-                      disabled={sending || !text.trim()}
+                      onClick={() => void submit()}
+                      disabled={sending || pendingRemote || !text.trim()}
                       className="shrink-0 rounded-md border border-gold-dim/60 bg-gold/10 px-3.5 py-2 text-[13px] text-gold transition-colors hover:bg-gold/20 disabled:opacity-40"
+                      title={pendingRemote ? "a send is in flight on another device" : undefined}
                     >
                       {sending ? "…" : "send"}
                     </button>

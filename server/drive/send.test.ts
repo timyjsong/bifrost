@@ -65,4 +65,20 @@ d("send executor (throwaway tmux session)", () => {
     const pane = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
     expect(pane).toMatch(/^ZZZ$/m);
   });
+
+  // The interrupt-restore bug (verified against the live Claude TUI): residual
+  // text in the input box must not survive into the next send — each send starts
+  // from a clean input. Exercised here with leftover unsubmitted text; without
+  // the clear, the editor concatenates the two (OLD<NEW>).
+  test("residual input is cleared before the next send (no concatenation)", async () => {
+    await fresh();
+    await sendText(SESSION, "echo OLDLINE", { submit: false });
+    await Bun.sleep(150);
+    await sendText(SESSION, "echo NEWLINE", { submit: false });
+    await Bun.sleep(150);
+    const pane = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
+    expect(pane).toContain("echo NEWLINE");
+    // the smoking-gun concatenation the bug produced must never appear
+    expect(pane).not.toContain("OLDLINEecho");
+  });
 });

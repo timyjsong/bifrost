@@ -154,7 +154,8 @@ export interface PaneState {
   drivable: boolean; // the session is tmux-resident (can be answered)
   menu: PermissionMenu | null;
   raw: string;
-  working: boolean; // a turn is in flight (read from the live pane — ground truth)
+  working: boolean; // the MAIN turn is in flight (live pane — control not yours yet)
+  pendingSend: boolean; // a send is parked server-side (grace window) — any device
 }
 
 // A slash command the suggester can offer. Non-authoritative: built-ins are a

@@ -31,6 +31,8 @@ import { sendText, sendKey, capturePane } from "./drive/send";
 import { parsePermissionMenu, isValidAnswerKey, isPaneWorking } from "./drive/menu";
 import { slashFor } from "./drive/slash";
 import { getDraft, setDraft } from "./drive/drafts";
+import { schedule as scheduleSend, cancel as cancelSend, isPending } from "./drive/scheduled";
+import { getSettings, setSettings, type Settings } from "./settings";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
 import { handleFilesRequest } from "./files/handler";
 import { mutedSessions } from "./alerts/sessions";
@@ -420,19 +422,39 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     if (!text.trim()) return Response.json({ ok: false, reason: "empty" }, { status: 400 });
     if (text.length > 100_000)
       return Response.json({ ok: false, reason: "too-long" }, { status: 413 });
+    // Validate injectability NOW so an undrivable session fails loud immediately
+    // (409) rather than silently never firing. It's RE-resolved at fire time too
+    // — a session that dies during the grace window simply doesn't fire.
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
     if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
-    try {
-      await sendText(tgt.tmuxSession, text);
-    } catch (err) {
-      return Response.json(
-        { ok: false, reason: "send-failed", detail: String((err as Error).message) },
-        { status: 502 },
-      );
-    }
-    await setDraft(sid, ""); // committed — clear the cross-device draft
-    return Response.json({ ok: true });
+    // Park the send for the grace period; a cancel within the window aborts it.
+    // The server owns the timer, so closing the app inside the window still fires.
+    const { sendDelayMs } = await getSettings();
+    const { fireAt } = scheduleSend(sid, sendDelayMs, async () => {
+      // Re-resolve against the LIVE tmux set at fire time (seconds later — the
+      // session may have moved or died). A failed/undrivable fire is swallowed:
+      // the client has moved on, and the pane "working" reading self-corrects the
+      // UI if nothing actually started.
+      const s = snapshot.sessions.find((x) => x.sessionId === sid);
+      const t = resolveTarget(s, liveTmuxSet(snapshot.system.tmux));
+      if (!t.ok) return;
+      try {
+        await sendText(t.tmuxSession, text);
+        await setDraft(sid, ""); // committed — clear the cross-device draft
+      } catch {
+        /* fire-time send failed; nothing started — UI corrects off the pane */
+      }
+    });
+    return Response.json({ ok: true, delayMs: sendDelayMs, fireAt });
+  }
+  // Cancel a parked send within its grace window (the "undo"). `cancelled:false`
+  // means nothing was pending (already fired in the race) — the client then
+  // treats it as sent rather than restoring the text.
+  const cancelMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/prompt\/cancel$/);
+  if (cancelMatch && req.method === "POST") {
+    const sid = decodeURIComponent(cancelMatch[1]);
+    return Response.json({ ok: true, cancelled: cancelSend(sid) });
   }
   // Interrupt a running turn (M4). Sends Esc — never Ctrl-C (which would exit the
   // session). The UI only exposes this while the session is working, so it can't
@@ -458,7 +480,13 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
     if (!tgt.ok)
-      return Response.json({ drivable: false, menu: null, raw: "", working: false });
+      return Response.json({
+        drivable: false,
+        menu: null,
+        raw: "",
+        working: false,
+        pendingSend: false,
+      });
     let raw = "";
     try {
       raw = await capturePane(tgt.tmuxSession);
@@ -471,6 +499,9 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       menu: parsePermissionMenu(raw),
       raw: tail,
       working: isPaneWorking(raw),
+      // a send parked server-side (this device's grace window OR another device's)
+      // → every polling device disables send for the whole in-flight window.
+      pendingSend: isPending(sid),
     });
   }
   // Answer a permission menu — a deliberately tiny surface (a digit or Enter),
@@ -528,6 +559,15 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       const text = typeof body.text === "string" ? body.text.slice(0, 100_000) : "";
       await setDraft(sid, text);
       return Response.json({ ok: true });
+    }
+  }
+  // App settings (currently the send grace period). Behind the global auth gate
+  // like every /api route. GET reads, PUT merges a partial patch and echoes back.
+  if (url.pathname === "/api/settings") {
+    if (req.method === "GET") return Response.json(await getSettings());
+    if (req.method === "PUT") {
+      const body = (await req.json().catch(() => ({}))) as Partial<Settings>;
+      return Response.json(await setSettings(body));
     }
   }
   if (url.pathname === "/api/health") {

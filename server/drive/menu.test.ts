@@ -74,7 +74,9 @@ describe("parsePermissionMenu", () => {
   });
 });
 
-// Fixtures from a real claude pane (the working line was captured live).
+// Fixtures from real claude panes (the status bars were captured live). "working"
+// = the main turn is in flight: the bar reads "esc to interrupt". The moment
+// control returns the bar flips to "← for agents" — even with bg work still going.
 const WORKING_PANE = `  Running 1 shell command…
   ⎿  $ cd /home/you/bifrost
 ✢ Crystallizing… (2m 55s · ↓ 11.5k tokens)
@@ -82,7 +84,7 @@ const WORKING_PANE = `  Running 1 shell command…
 ────────────────────────────────────────────────
 ❯ some queued text
 ────────────────────────────────────────────────
-  ⏵⏵ auto mode on (shift+tab to cycle)        /rc active`;
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt        /rc active`;
 
 const IDLE_PANE = `● Done — here's the result.
   ⎿  output line one
@@ -90,23 +92,44 @@ const IDLE_PANE = `● Done — here's the result.
 ────────────────────────────────────────────────
 ❯
 ────────────────────────────────────────────────
-  ⏵⏵ auto mode on (shift+tab to cycle)        /rc active`;
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents        /rc active`;
+
+// Soft idle: control is back with the user, but a background shell is still
+// running. NOT mid-processing → send must be enabled, so this reads false.
+const SOFT_IDLE_BG_PANE = `❯ run sleep 120 in the background
+● BG-STARTED
+✻ Crunched for 10s · 1 shell still running
+────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────
+  ⏵⏵ auto mode on · 1 shell · ← for agents · ↓ to manage        /rc active`;
 
 describe("isPaneWorking", () => {
-  test("a live elapsed timer ((Nm Ns · …)) means working", () => {
+  test("the main turn is in flight ('esc to interrupt' in the status bar)", () => {
     expect(isPaneWorking(WORKING_PANE)).toBe(true);
-    expect(isPaneWorking("● thinking… (5s · ↑ 1.2k tokens)\n❯")).toBe(true);
+    expect(
+      isPaneWorking("✶ Thinking…\n❯\n  ⏵⏵ auto mode on · esc to interrupt"),
+    ).toBe(true);
   });
 
-  test("no timer line means idle", () => {
+  test("control returned (no 'esc to interrupt') means not working", () => {
     expect(isPaneWorking(IDLE_PANE)).toBe(false);
     expect(isPaneWorking("")).toBe(false);
     expect(isPaneWorking("just some output\n❯ ")).toBe(false);
   });
 
-  test("a parens-with-time deep in scrollback (not the status line) doesn't count", () => {
+  test("soft idle with a background shell still running is NOT working", () => {
+    expect(isPaneWorking(SOFT_IDLE_BG_PANE)).toBe(false);
+  });
+
+  test("an elapsed timer alone (no 'esc to interrupt') is not the signal", () => {
+    // the old heuristic flickered on this; the bar marker is what counts now
+    expect(isPaneWorking("● thinking… (5s · ↑ 1.2k tokens)\n❯")).toBe(false);
+  });
+
+  test("a stray 'esc to interrupt' deep in scrollback doesn't count", () => {
     const filler = Array.from({ length: 15 }, () => "more output").join("\n");
-    expect(isPaneWorking(`the build took (3s · whatever)\n${filler}\n❯`)).toBe(false);
+    expect(isPaneWorking(`hint: press esc to interrupt\n${filler}\n❯`)).toBe(false);
   });
 });
 

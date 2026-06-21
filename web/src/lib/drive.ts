@@ -38,18 +38,52 @@ export interface SendResult {
   reason?: string; // present when !ok
 }
 
-export async function sendPrompt(sessionId: string, text: string): Promise<SendResult> {
+export interface ScheduleResult extends SendResult {
+  /** Grace period (ms) the server parked the send for — the UI's countdown. */
+  delayMs?: number;
+}
+
+/**
+ * Submit a prompt. The server PARKS it for a grace period and returns how long
+ * (delayMs); it injects when the window elapses unless cancelled first. A 409
+ * (non-injectable / vanished) or other error comes back as { ok:false, reason }.
+ */
+export async function schedulePrompt(sessionId: string, text: string): Promise<ScheduleResult> {
   try {
     const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/prompt`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text }),
     });
-    if (r.ok) return { ok: true };
+    if (r.ok) {
+      const j = (await r.json().catch(() => ({}))) as { delayMs?: number };
+      return { ok: true, delayMs: j.delayMs };
+    }
     const j = (await r.json().catch(() => ({}))) as { reason?: string };
     return { ok: false, reason: j.reason ?? `http ${r.status}` };
   } catch (e) {
     return { ok: false, reason: (e as Error).message };
+  }
+}
+
+/**
+ * Cancel a parked send within its grace window (the "undo"). `cancelled:true`
+ * means it was truly aborted (restore the user's text); `cancelled:false` means
+ * it had already fired — treat it as sent, don't restore.
+ */
+export async function cancelPrompt(
+  sessionId: string,
+): Promise<{ ok: boolean; cancelled: boolean }> {
+  try {
+    const r = await apiFetch(
+      `/api/session/${encodeURIComponent(sessionId)}/prompt/cancel`,
+      { method: "POST" },
+    );
+    if (!r.ok) return { ok: false, cancelled: false };
+    const j = (await r.json().catch(() => ({}))) as { cancelled?: boolean };
+    return { ok: true, cancelled: !!j.cancelled };
+  } catch {
+    return { ok: false, cancelled: false };
   }
 }
 
@@ -156,4 +190,39 @@ export async function saveDraft(sessionId: string, text: string): Promise<void> 
   } catch {
     /* draft save is best-effort — losing one keystroke's sync is harmless */
   }
+}
+
+export interface DraftSync {
+  /** Whether to replace the textarea with `value`. */
+  adopt: boolean;
+  value: string;
+  /** The new last-synced baseline to remember (what the server now holds). */
+  baseline: string;
+}
+
+/**
+ * Decide how a freshly-polled server draft reconciles with this device's state,
+ * so live cross-device sync never clobbers what you're typing. Inputs: `local`
+ * (the textarea now), `lastSynced` (the value this device last PUT or adopted),
+ * `remote` (what the poll just read).
+ *
+ *  - remote === lastSynced → nothing changed elsewhere since our baseline → keep
+ *    local (we may have un-saved keystrokes the server hasn't seen yet).
+ *  - remote === local → already showing it → don't touch the box, just advance
+ *    the baseline so we stop re-comparing.
+ *  - otherwise → a genuine edit from another device → adopt it.
+ *
+ * Last-write-wins: a remote edit overwrites un-saved local keystrokes. Acceptable
+ * — single user across their own devices; matches the server's last-write-wins
+ * draft store (no conflict UI).
+ */
+export function reconcileDraft(args: {
+  local: string;
+  lastSynced: string;
+  remote: string;
+}): DraftSync {
+  const { local, lastSynced, remote } = args;
+  if (remote === lastSynced) return { adopt: false, value: local, baseline: lastSynced };
+  if (remote === local) return { adopt: false, value: local, baseline: remote };
+  return { adopt: true, value: remote, baseline: remote };
 }

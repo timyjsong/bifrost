@@ -80,16 +80,20 @@ export function isValidAnswerKey(key: string): boolean {
   return /^[1-9]$/.test(key) || key === "Enter";
 }
 
-// A turn in flight shows a status line with a LIVE elapsed timer in parens, e.g.
-// "✢ Crystallizing… (2m 55s · ↓ 11.5k tokens)" — verified against a real claude
-// pane. When idle, that line is gone (just the input box + mode line remain). This
-// is the ground-truth "is working" signal the drive view's send↔stop button reads,
-// straight from the same pane as the menu — no laggy derived guess.
-const WORKING = /\(\s*(?:\d+m\s*)?\d+s\s+·/;
+// The status bar shows "esc to interrupt" exactly while the MAIN turn is running
+// (control not yet yours), and flips to "← for agents" the instant control returns
+// — even with background shells/agents still going ("· N shells · ← for agents").
+// So this marker is the precise "mid-processing" signal: true only while the turn
+// is in flight, FALSE at soft idle (returned, bg work pending) and true idle alike.
+// Verified live: present continuously through a turn, gone the instant it ends.
+// (The older "(Ns · …)" elapsed-timer heuristic was dropped — it FLICKERED, absent
+// at turn start and between thinking phases → false negatives, and a "N shell still
+// running" line could read as work.)
+const WORKING = /esc to interrupt/;
 
 export function isPaneWorking(paneText: string): boolean {
-  // the spinner/status line is pinned just above the input box at the foot of the
-  // pane; scan the bottom region to avoid a stray "(5s · …)" in scrollback.
+  // the status bar is pinned at the foot of the pane; scan only the bottom region
+  // so a stray "esc to interrupt" in transcript scrollback can't false-positive.
   const lines = paneText.split("\n").filter((l) => l.trim());
-  return lines.slice(-12).some((l) => WORKING.test(l));
+  return lines.slice(-6).some((l) => WORKING.test(l));
 }

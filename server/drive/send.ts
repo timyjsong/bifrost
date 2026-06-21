@@ -33,20 +33,46 @@ export interface SendOpts {
 }
 
 /**
+ * Empty the pane's input editor before a paste, so a new prompt never lands on
+ * top of leftover text and gets submitted concatenated. The motivating residue
+ * (verified against the live Claude TUI): pressing Esc to interrupt a turn
+ * RESTORES the interrupted prompt back into the input box.
+ *
+ * C-u kills to line-start (one logical line); we loop because a restored
+ * multi-line prompt spans several, stopping as soon as a press changes nothing
+ * (box already empty). C-u is the load-bearing choice: it's a SAFE no-op on an
+ * empty box, whereas C-c — tried first — arms "Ctrl-C again to exit", a mode that
+ * SWALLOWS the very next paste (the common empty-box case broke), and Esc-Esc
+ * opens the rewind menu on an empty box. A short settle after each press lets Ink
+ * process it before we read the pane or paste (back-to-back input races it).
+ */
+async function clearInput(target: string): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    const before = await capturePane(target);
+    await tmux(["send-keys", "-t", target, "C-u"]);
+    await Bun.sleep(60);
+    if ((await capturePane(target)) === before) return; // nothing left to kill
+  }
+}
+
+/**
  * Paste `text` into `target`'s active pane as one bracketed-paste unit, then
  * (by default) submit. `target` must already be validated by resolveTarget.
+ * Clears any residual input first (see clearInput).
  */
 export async function sendText(
   target: string,
   text: string,
   opts: SendOpts = {},
 ): Promise<void> {
+  await clearInput(target);
   const buf = `bifrost-${randomBytes(6).toString("hex")}`;
   await tmux(["load-buffer", "-b", buf, "-"], text);
   // -p: bracketed paste (the TUI sees a paste, not typed input → embedded
   //     newlines don't submit line-by-line). -d: drop the buffer after pasting.
   await tmux(["paste-buffer", "-p", "-d", "-b", buf, "-t", target]);
   if (opts.submit ?? true) {
+    await Bun.sleep(60); // let the paste land before Enter (multi-line can lag)
     await tmux(["send-keys", "-t", target, "Enter"]);
   }
 }

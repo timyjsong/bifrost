@@ -8,6 +8,7 @@ import { SessionsPane } from "./components/SessionsPane";
 import { ProjectsPane } from "./components/ProjectsPane";
 import { SystemPane } from "./components/SystemPane";
 import { AlertsPane } from "./components/AlertsPane";
+import { SettingsPane } from "./components/SettingsPane";
 import { Enroll } from "./components/Enroll";
 import { DriveView } from "./components/DriveView";
 import { getToken, AUTH_LOST_EVENT } from "./lib/api";
@@ -280,6 +281,7 @@ function Dashboard() {
     },
     { id: "system", label: "System", alert: 0, node: <SystemPane system={snap.system} now={now} /> },
     { id: "alerts", label: "Alerts", alert: 0, node: <AlertsPane /> },
+    { id: "settings", label: "Settings", alert: 0, node: <SettingsPane /> },
     {
       id: "projects",
       label: "Projects",
