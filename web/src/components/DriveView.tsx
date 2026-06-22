@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ContentBlock,
   InteractionMessage,
@@ -21,8 +21,23 @@ import {
   filterSlash,
 } from "../lib/drive";
 import { resolveKey } from "../lib/keymap";
+import {
+  buildToolIndex,
+  summarizeTool,
+  visibleBlocks,
+  type ToolIndex,
+  type ToolResultView,
+} from "../lib/toolView";
 import { fetchSettings } from "../lib/settings";
 import { Dot } from "./ui";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  isHorizontalBack,
+  isCommitted,
+  clampDrag,
+  shouldComplete,
+} from "../lib/gesture";
 
 // Lazy — xterm.js is heavy and only needed when the raw view is opened, so it
 // code-splits out of the main bundle (keeps the PWA's first load lean).
@@ -30,20 +45,64 @@ const RawTerminal = lazy(() =>
   import("./RawTerminal").then((m) => ({ default: m.RawTerminal })),
 );
 
-/** A one-line summary of a tool call's input, best-effort across tool shapes. */
-function toolSummary(input: unknown): string {
-  if (input && typeof input === "object") {
-    const o = input as Record<string, unknown>;
-    const pick = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.url;
-    if (typeof pick === "string") return pick;
-    try {
-      const s = JSON.stringify(o);
-      return s.length > 120 ? s.slice(0, 117) + "…" : s;
-    } catch {
-      return "";
-    }
-  }
-  return typeof input === "string" ? input : "";
+/** One tool/command call, collapsed to a single row by default; click to expand
+ *  its full input + output. Errors start expanded (toolDefaultExpanded). This is
+ *  behavior layered on Bifrost's own styling — not a reskin. */
+function ToolCall({
+  name,
+  input,
+  result,
+}: {
+  name: string;
+  input: unknown;
+  result?: ToolResultView;
+}) {
+  const summary = summarizeTool(name, input);
+  const [expanded, setExpanded] = useState(false);
+  // A failed call stays collapsed (like the rest) but the whole row turns red so
+  // the failure is obvious at a glance without expanding.
+  const err = result?.isError ?? false;
+  return (
+    <div className="font-mono text-[12px]">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className={`flex w-full items-baseline gap-1.5 text-left transition-colors ${
+          err ? "text-danger/90 hover:text-danger" : "text-ink-mute hover:text-ink-dim"
+        }`}
+      >
+        <span className={`shrink-0 ${err ? "text-danger/70" : "text-ink-mute/60"}`}>
+          {expanded ? "▾" : "▸"}
+        </span>
+        <span className={`shrink-0 ${err ? "text-danger" : "text-auto"}`}>→ {name}</span>
+        <span className={`min-w-0 truncate ${err ? "text-danger/80" : "text-ink-mute/80"}`}>
+          {clip(summary, 160)}
+        </span>
+        {result && (
+          <span className={`ml-auto shrink-0 ${err ? "text-danger" : "text-ink-mute/40"}`}>
+            {err ? "✗" : "✓"}
+          </span>
+        )}
+      </button>
+      {expanded && (
+        <div className="mt-1 space-y-1.5 border-l border-line-soft pl-3">
+          {summary && (
+            <div className="whitespace-pre-wrap break-words text-[11.5px] leading-snug text-ink-mute/80">
+              {summary}
+            </div>
+          )}
+          {result && (
+            <div
+              className={`whitespace-pre-wrap break-words text-[11.5px] leading-snug ${
+                result.isError ? "text-danger/90" : "text-ink-mute/70"
+              }`}
+            >
+              {clip(result.text.trim(), 2000) || "(no output)"}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function clip(s: string, n: number): string {
@@ -59,7 +118,7 @@ function userPromptCount(st: InteractionState | null): number {
   ).length;
 }
 
-function Block({ b }: { b: ContentBlock }) {
+function Block({ b }: { b: Exclude<ContentBlock, { kind: "tool_use" }> }) {
   switch (b.kind) {
     case "thinking":
       return (
@@ -69,21 +128,14 @@ function Block({ b }: { b: ContentBlock }) {
       );
     case "text":
       return (
-        <div className="whitespace-pre-wrap text-[13.5px] leading-relaxed text-ink-dim">
-          {b.text}
-        </div>
-      );
-    case "tool_use":
-      return (
-        <div className="font-mono text-[12px] text-ink-mute">
-          <span className="text-auto">→ {b.name}</span>{" "}
-          <span className="text-ink-mute/80">{clip(toolSummary(b.input), 160)}</span>
+        <div className="chat-md text-[13.5px] leading-relaxed text-ink-dim">
+          <Markdown remarkPlugins={[remarkGfm]}>{b.text}</Markdown>
         </div>
       );
     case "tool_result":
       return (
         <div
-          className={`whitespace-pre-wrap border-l border-line-soft pl-3 font-mono text-[11.5px] leading-snug ${
+          className={`whitespace-pre-wrap break-words border-l border-line-soft pl-3 font-mono text-[11.5px] leading-snug ${
             b.isError ? "text-danger/90" : "text-ink-mute/70"
           }`}
         >
@@ -93,17 +145,29 @@ function Block({ b }: { b: ContentBlock }) {
   }
 }
 
-function Message({ m }: { m: InteractionMessage }) {
+function renderBlock(tools: ToolIndex) {
+  return (b: ContentBlock, i: number) =>
+    b.kind === "tool_use" ? (
+      <ToolCall key={i} name={b.name} input={b.input} result={tools.resultByUseId.get(b.id)} />
+    ) : (
+      <Block key={i} b={b} />
+    );
+}
+
+function Message({ m, tools }: { m: InteractionMessage; tools: ToolIndex }) {
   const isUser = m.role === "user";
   const isToolResult = isUser && m.blocks.every((b) => b.kind === "tool_result");
+  // A tool_result folded into its tool-call unit isn't rendered standalone; if
+  // that empties the message (all blocks were consumed results), drop it.
+  const blocks = visibleBlocks(m.blocks, tools.consumedForIds);
+  if (blocks.length === 0) return null;
+  const render = renderBlock(tools);
 
   if (isUser && !isToolResult) {
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] whitespace-pre-wrap rounded-lg rounded-br-sm border border-gold-dim/40 bg-gold/[0.06] px-3.5 py-2 text-[13.5px] leading-relaxed text-ink">
-          {m.blocks.map((b, i) => (
-            <Block key={i} b={b} />
-          ))}
+          {blocks.map(render)}
         </div>
       </div>
     );
@@ -116,11 +180,7 @@ function Message({ m }: { m: InteractionMessage }) {
           subagent
         </div>
       )}
-      <div className="space-y-1.5">
-        {m.blocks.map((b, i) => (
-          <Block key={i} b={b} />
-        ))}
-      </div>
+      <div className="space-y-1.5">{blocks.map(render)}</div>
     </div>
   );
 }
@@ -140,7 +200,13 @@ export function DriveView({
   const { state, connected } = useSessionStream(session.sessionId);
   const pane = usePaneState(session.sessionId);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const drag = useRef({ active: false, committed: false, startX: 0, startY: 0, dx: 0 });
+  const [dragX, setDragX] = useState(0);
+  const [snapping, setSnapping] = useState(false);
   const msgCount = state?.messages.length ?? 0;
+  // Pair tool calls with their results so each renders as one collapsible unit.
+  const toolIndex = useMemo(() => buildToolIndex(state?.messages ?? []), [state]);
 
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
@@ -224,6 +290,76 @@ export function DriveView({
       document.body.style.overflow = prev;
     };
   }, []);
+
+  // iOS-style edge-swipe back: a drag starting at the left edge and moving
+  // left→right follows the finger (the overlay slides across, revealing the
+  // dashboard beneath); released past a fraction of the width it completes
+  // (onClose), else it snaps back. Native non-passive listener so we can
+  // preventDefault scrolling once the gesture commits to horizontal. Thresholds
+  // are the pure, tested helpers in lib/gesture.
+  useEffect(() => {
+    const el = overlayRef.current;
+    if (!el) return;
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        drag.current.active = false;
+        return;
+      }
+      // Arm anywhere on the view — the rightward horizontal commit below is what
+      // makes it a back-swipe; a vertical move stays a scroll. No edge needed
+      // (the transcript can't scroll horizontally, so there's nothing to clash).
+      drag.current = {
+        active: true,
+        committed: false,
+        startX: e.touches[0].clientX,
+        startY: e.touches[0].clientY,
+        dx: 0,
+      };
+      setSnapping(false);
+    };
+    const onMove = (e: TouchEvent) => {
+      const d = drag.current;
+      if (!d.active) return;
+      const dx = e.touches[0].clientX - d.startX;
+      const dy = e.touches[0].clientY - d.startY;
+      if (!d.committed) {
+        if (!isCommitted(dx, dy)) return;
+        if (!isHorizontalBack(dx, dy)) {
+          d.active = false; // vertical — let the transcript scroll
+          return;
+        }
+        d.committed = true;
+      }
+      e.preventDefault();
+      d.dx = clampDrag(dx, window.innerWidth);
+      setDragX(d.dx);
+    };
+    const onEnd = () => {
+      const d = drag.current;
+      if (!d.active || !d.committed) {
+        d.active = false;
+        return;
+      }
+      d.active = false;
+      setSnapping(true);
+      if (shouldComplete(d.dx, window.innerWidth)) {
+        setDragX(window.innerWidth);
+        window.setTimeout(onClose, 220);
+      } else {
+        setDragX(0);
+      }
+    };
+    el.addEventListener("touchstart", onStart, { passive: true });
+    el.addEventListener("touchmove", onMove, { passive: false });
+    el.addEventListener("touchend", onEnd, { passive: true });
+    el.addEventListener("touchcancel", onEnd, { passive: true });
+    return () => {
+      el.removeEventListener("touchstart", onStart);
+      el.removeEventListener("touchmove", onMove);
+      el.removeEventListener("touchend", onEnd);
+      el.removeEventListener("touchcancel", onEnd);
+    };
+  }, [onClose]);
 
   // Stick to the latest as the conversation grows (live feel).
   useEffect(() => {
@@ -406,7 +542,15 @@ export function DriveView({
   }, []);
 
   return (
-    <div className="fixed inset-0 z-[60] flex flex-col bg-bg">
+    <div
+      ref={overlayRef}
+      className="fixed inset-0 z-[60] flex flex-col bg-bg"
+      style={{
+        transform: dragX ? `translateX(${dragX}px)` : undefined,
+        transition: snapping ? "transform 0.22s ease-out" : undefined,
+        boxShadow: dragX ? "-12px 0 28px rgba(0,0,0,0.45)" : undefined,
+      }}
+    >
       <header className="flex items-center gap-3 border-b border-line-soft bg-bg/90 px-4 py-3 backdrop-blur-md">
         <button
           onClick={onClose}
@@ -450,7 +594,7 @@ export function DriveView({
           </Suspense>
         </div>
       ) : (
-      <div className="mx-auto w-full max-w-4xl flex-1 space-y-4 overflow-y-auto px-4 py-5">
+      <div className="mx-auto w-full max-w-4xl flex-1 space-y-4 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-5 [touch-action:pan-y]">
         {state === null && (
           <div className="pt-10 text-center text-[12px] text-ink-mute">loading…</div>
         )}
@@ -460,7 +604,7 @@ export function DriveView({
           </div>
         )}
         {state?.messages.map((m) => (
-          <Message key={m.uuid} m={m} />
+          <Message key={m.uuid} m={m} tools={toolIndex} />
         ))}
         {pending !== null && (
           <div className="flex justify-end">
@@ -476,7 +620,7 @@ export function DriveView({
       </div>
       )}
 
-      <footer className="border-t border-line-soft bg-bg/90 px-4 py-3">
+      <footer className="chat-footer-safe border-t border-line-soft bg-bg/90 px-4 pt-3">
         <div className="mx-auto w-full max-w-4xl">
           {pane?.menu && (
             <div className="mb-3 rounded-md border border-danger/40 bg-danger/[0.06] p-3">
