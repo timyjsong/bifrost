@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { parsePermissionMenu, isValidAnswerKey, isPaneWorking } from "./menu";
+import {
+  parsePermissionMenu,
+  isValidAnswerKey,
+  isPaneWorking,
+  parsePermissionMode,
+} from "./menu";
 
 // Fixture mirrors the assumed Claude Code permission dialog (boxed, ❯ cursor).
 // NOTE: confirm against a live prompt at review — if the real format differs,
@@ -140,3 +145,19 @@ describe("isValidAnswerKey", () => {
       expect(isValidAnswerKey(k)).toBe(false);
   });
 });
+
+describe("parsePermissionMode — read the mode off the pane (spike-verified strings)", () => {
+  const bar = (s: string) => `❯ try something\n──────────\n  ${s} · ← for agents   /rc active`;
+  test("auto / accept edits / plan are each detected", () => {
+    expect(parsePermissionMode(bar("⏵⏵ auto mode on (shift+tab to cycle)"))).toBe("auto");
+    expect(parsePermissionMode(bar("⏵⏵ accept edits on (shift+tab to cycle)"))).toBe("accept-edits");
+    expect(parsePermissionMode(bar("⏸ plan mode on (shift+tab to cycle)"))).toBe("plan");
+  });
+  test("plan is matched before auto (its 'mode on' can't be mistaken)", () => {
+    expect(parsePermissionMode("⏸ plan mode on")).toBe("plan");
+  });
+  test("no mode line → null", () => {
+    expect(parsePermissionMode("just some transcript text")).toBeNull();
+  });
+});
+

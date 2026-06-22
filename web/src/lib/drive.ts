@@ -1,5 +1,5 @@
 import { apiFetch } from "./api";
-import type { PaneState, SlashCommand } from "../../../shared/types";
+import type { PaneState, PermissionMode, SlashCommand } from "../../../shared/types";
 
 /**
  * The gate for whether a session can be driven at all (AC3.5). Pure, so the
@@ -99,6 +99,22 @@ export async function interrupt(sessionId: string): Promise<SendResult> {
     return { ok: false, reason: j.reason ?? `http ${r.status}` };
   } catch (e) {
     return { ok: false, reason: (e as Error).message };
+  }
+}
+
+/** Set the session's permission mode (auto / accept-edits / plan). The server
+ *  injects the right number of Shift+Tab presses; bypass is launch-only and
+ *  rejected. Returns whether it took. */
+export async function setMode(sessionId: string, mode: PermissionMode): Promise<boolean> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/mode`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    return r.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -225,4 +241,35 @@ export function reconcileDraft(args: {
   if (remote === lastSynced) return { adopt: false, value: local, baseline: lastSynced };
   if (remote === local) return { adopt: false, value: local, baseline: remote };
   return { adopt: true, value: remote, baseline: remote };
+}
+
+export interface UploadedFile {
+  /** Absolute server-side path — injected into the prompt for Claude to read. */
+  path: string;
+  /** Stored filename (shown on the composer chip). */
+  name: string;
+}
+
+/**
+ * Upload attachment files for a session. Returns the saved files; the composer
+ * injects their path(s) into the prompt, since the tmux TUI can't take binaries.
+ * Best-effort — a failure returns [] (FormData sets its own multipart boundary,
+ * so no content-type header here).
+ */
+export async function uploadFiles(
+  sessionId: string,
+  files: File[],
+): Promise<UploadedFile[]> {
+  const form = new FormData();
+  for (const f of files) form.append("file", f);
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/upload`, {
+      method: "POST",
+      body: form,
+    });
+    if (!r.ok) return [];
+    return ((await r.json()) as { files?: UploadedFile[] }).files ?? [];
+  } catch {
+    return [];
+  }
 }

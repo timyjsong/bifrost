@@ -1,11 +1,13 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import type {
   ContentBlock,
   InteractionMessage,
   InteractionState,
+  PermissionMode,
   SessionInfo,
   SlashCommand,
 } from "../../../shared/types";
+import { PERMISSION_MODES, PERMISSION_MODE_LABELS } from "../../../shared/types";
 import { basename, tildify } from "../lib/format";
 import { useSessionStream, usePaneState } from "../lib/useSessionStream";
 import {
@@ -15,10 +17,13 @@ import {
   getDraft,
   saveDraft,
   reconcileDraft,
+  uploadFiles,
+  setMode,
   interrupt,
   answer,
   getSlashCommands,
   filterSlash,
+  type UploadedFile,
 } from "../lib/drive";
 import { resolveKey } from "../lib/keymap";
 import {
@@ -107,6 +112,38 @@ function ToolCall({
 
 function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function PaperclipIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="size-[18px]"
+    >
+      <path d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l8.49-8.49a3.5 3.5 0 0 1 4.95 4.95l-8.49 8.49a2 2 0 0 1-2.83-2.83l7.78-7.78" />
+    </svg>
+  );
+}
+
+function ArrowUpIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="size-[18px]"
+    >
+      <path d="M12 19V5M5 12l7-7 7 7" />
+    </svg>
+  );
 }
 
 /** Count real user PROMPTS (not tool_result lines) — the reconcile signal: a
@@ -230,6 +267,10 @@ export function DriveView({
   textRef.current = text;
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [attachments, setAttachments] = useState<UploadedFile[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [modeOptimistic, setModeOptimistic] = useState<PermissionMode | null>(null);
   const [slashCmds, setSlashCmds] = useState<SlashCommand[]>([]);
 
   const gate = promptGate(session);
@@ -247,6 +288,8 @@ export function DriveView({
   const busy = working || inGrace || pendingRemote; // send unavailable
   const showStop = !inGrace && working; // stop=interrupt only while a turn runs
   const graceLeft = graceUntil ? Math.max(0, Math.ceil((graceUntil - Date.now()) / 1000)) : 0;
+  // Current permission mode: the optimistic pick until the pane poll confirms it.
+  const currentMode = modeOptimistic ?? pane?.mode ?? null;
 
   // Slash-command list for the suggester (disk-scanned server-side, fetched once).
   useEffect(() => {
@@ -447,6 +490,16 @@ export function DriveView({
     return () => clearTimeout(t);
   }, [optimistic]);
 
+  // Drop the optimistic mode once the pane reading agrees (or as a backstop).
+  useEffect(() => {
+    if (modeOptimistic !== null && pane?.mode === modeOptimistic) setModeOptimistic(null);
+  }, [pane?.mode, modeOptimistic]);
+  useEffect(() => {
+    if (modeOptimistic === null) return;
+    const t = setTimeout(() => setModeOptimistic(null), 4000);
+    return () => clearTimeout(t);
+  }, [modeOptimistic]);
+
   // A different session opened — drop any stale optimistic flip and grace window
   // (a send parked for the previous session still fires server-side; the UI just
   // stops tracking it here).
@@ -454,19 +507,27 @@ export function DriveView({
     setOptimistic(null);
     setGraceUntil(null);
     setPending(null);
+    setAttachments([]);
+    setModeOptimistic(null);
   }, [session.sessionId]);
 
   const submit = async () => {
     const t = text.trim();
-    if (!gate.canSend || busy || sending || !t) return;
+    const atts = attachments;
+    const paths = atts.map((a) => a.path);
+    if (!gate.canSend || busy || sending || (!t && paths.length === 0)) return;
+    // Inject the uploaded file paths into the prompt — the TUI can't take
+    // binaries, so Claude reads them by path.
+    const composed = paths.length ? `${paths.join("\n")}${t ? "\n" + t : ""}` : t;
     setSending(true);
     setError(null);
     pendingBase.current = userPromptCount(state);
-    setPending(t); // echo bubble
+    setPending(composed); // echo bubble
     skipSave.current = true; // server clears the draft when the send fires
     setText("");
+    setAttachments([]);
     setGraceUntil(Date.now() + delayMs); // open the grace window (locks input)
-    const res = await schedulePrompt(session.sessionId, t);
+    const res = await schedulePrompt(session.sessionId, composed);
     setSending(false);
     if (!res.ok) {
       // never parked — revert everything and surface the failure loud
@@ -474,8 +535,35 @@ export function DriveView({
       setGraceUntil(null);
       skipSave.current = true;
       setText(t);
+      setAttachments(atts);
       setError(res.reason ?? "send failed");
     }
+  };
+
+  // Attach: upload picked files, then show them as chips; their paths are injected
+  // into the prompt on send.
+  const onPickFiles = async (e: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // let the same file be re-picked later
+    if (!files.length) return;
+    setError(null);
+    setUploading(true);
+    const saved = await uploadFiles(session.sessionId, files);
+    setUploading(false);
+    if (saved.length) setAttachments((xs) => [...xs, ...saved]);
+    else setError("upload failed");
+  };
+
+  // Permission mode: tap the pill to cycle (auto → accept edits → plan). The
+  // server injects the Shift+Tab presses; optimistically show the next mode until
+  // the pane poll confirms it.
+  const cycleMode = async () => {
+    const cur = currentMode ?? "auto";
+    const next =
+      PERMISSION_MODES[(PERMISSION_MODES.indexOf(cur) + 1) % PERMISSION_MODES.length];
+    setModeOptimistic(next);
+    const ok = await setMode(session.sessionId, next);
+    if (!ok) setModeOptimistic(null); // failed — let the pane reading drive
   };
 
   // Stop does double duty: within the grace window it CANCELS the parked send
@@ -675,7 +763,31 @@ export function DriveView({
                     ))}
                   </div>
                 )}
-                <div className="flex items-end gap-2">
+                <div className="rounded-2xl border border-line-soft bg-panel/50 transition-colors focus-within:border-gold-dim/60">
+                  {attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
+                      {attachments.map((a) => (
+                        <span
+                          key={a.path}
+                          className="inline-flex max-w-[200px] items-center gap-1 rounded-md border border-line-soft bg-bg/60 px-2 py-1 text-[11px] text-ink-dim"
+                        >
+                          <span className="shrink-0 text-ink-mute/70">
+                            <PaperclipIcon />
+                          </span>
+                          <span className="truncate">{a.name}</span>
+                          <button
+                            onClick={() =>
+                              setAttachments((xs) => xs.filter((x) => x.path !== a.path))
+                            }
+                            className="shrink-0 text-ink-mute transition-colors hover:text-danger"
+                            aria-label={`remove ${a.name}`}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <textarea
                     ref={taRef}
                     value={text}
@@ -696,42 +808,84 @@ export function DriveView({
                     rows={2}
                     placeholder={
                       inGrace
-                        ? "sending… ⌥⏎ (alt+enter) to cancel"
+                        ? "sending… ⌥⏎ to cancel"
                         : working
-                          ? "running — compose your next message · ⌥⏎ to interrupt"
+                          ? "running — compose your next message…"
                           : pendingRemote
                             ? "a send is in flight on another device…"
-                            : "message this session…  (⌘/Ctrl+Enter to send · enter for newline · / for commands)"
+                            : "message this session…"
                     }
-                    className="max-h-40 min-h-[40px] flex-1 resize-y rounded-md border border-line bg-panel px-3 py-2 text-[13px] text-ink placeholder:text-ink-mute/60 focus:border-gold-dim/60 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                    className="max-h-40 min-h-[44px] w-full resize-none bg-transparent px-3.5 pb-1 pt-3 text-[13px] text-ink placeholder:text-ink-mute/60 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
                   />
-                  {inGrace ? (
+                  <div className="flex items-center gap-1 px-2 pb-2">
+                    <input
+                      ref={fileRef}
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={(e) => void onPickFiles(e)}
+                    />
                     <button
-                      onClick={() => void stop()}
-                      className="shrink-0 rounded-md border border-danger/50 bg-danger/10 px-3.5 py-2 text-[13px] font-medium text-danger transition-colors hover:bg-danger/20"
-                      title="cancel the send (alt+enter)"
+                      onClick={() => fileRef.current?.click()}
+                      disabled={inGrace || uploading}
+                      title="attach files"
+                      aria-label="attach files"
+                      className="grid size-9 place-items-center rounded-full text-ink-mute transition-colors hover:bg-panel-raised hover:text-ink-dim disabled:opacity-40"
                     >
-                      cancel · {graceLeft}s
+                      {uploading ? <span className="text-[12px]">…</span> : <PaperclipIcon />}
                     </button>
-                  ) : showStop ? (
-                    <button
-                      onClick={() => void stop()}
-                      disabled={interrupting}
-                      className="shrink-0 rounded-md border border-danger/50 bg-danger/10 px-3.5 py-2 text-[13px] font-medium text-danger transition-colors hover:bg-danger/20 disabled:opacity-50"
-                      title="interrupt (alt+enter)"
-                    >
-                      {interrupting ? "…" : "■ stop"}
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => void submit()}
-                      disabled={sending || pendingRemote || !text.trim()}
-                      className="shrink-0 rounded-md border border-gold-dim/60 bg-gold/10 px-3.5 py-2 text-[13px] text-gold transition-colors hover:bg-gold/20 disabled:opacity-40"
-                      title={pendingRemote ? "a send is in flight on another device" : undefined}
-                    >
-                      {sending ? "…" : "send"}
-                    </button>
-                  )}
+                    {currentMode && (
+                      <button
+                        onClick={() => void cycleMode()}
+                        disabled={inGrace}
+                        title="permission mode — tap to cycle (auto / accept edits / plan)"
+                        className="rounded-full border border-line-soft px-2.5 py-1 text-[11px] text-ink-mute transition-colors hover:border-gold-dim/50 hover:text-ink-dim disabled:opacity-40"
+                      >
+                        {PERMISSION_MODE_LABELS[currentMode]}
+                      </button>
+                    )}
+                    <div className="ml-auto">
+                      {inGrace ? (
+                        <button
+                          onClick={() => void stop()}
+                          title="cancel the send (alt+enter)"
+                          aria-label="cancel send"
+                          className="grid size-9 place-items-center rounded-full border border-danger/50 bg-danger/10 text-[12px] font-medium text-danger transition-colors hover:bg-danger/20"
+                        >
+                          {graceLeft}
+                        </button>
+                      ) : showStop ? (
+                        <button
+                          onClick={() => void stop()}
+                          disabled={interrupting}
+                          title="interrupt (alt+enter)"
+                          aria-label="stop"
+                          className="grid size-9 place-items-center rounded-full border border-danger/50 bg-danger/10 text-danger transition-colors hover:bg-danger/20 disabled:opacity-50"
+                        >
+                          {interrupting ? "…" : "■"}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => void submit()}
+                          disabled={
+                            sending ||
+                            uploading ||
+                            pendingRemote ||
+                            (!text.trim() && attachments.length === 0)
+                          }
+                          title={
+                            pendingRemote
+                              ? "a send is in flight on another device"
+                              : "send (⌘/Ctrl+Enter)"
+                          }
+                          aria-label="send"
+                          className="grid size-9 place-items-center rounded-full bg-gold text-bg transition-colors hover:bg-gold/90 disabled:bg-gold-dim/30 disabled:text-ink-mute"
+                        >
+                          {sending ? <span className="text-[12px]">…</span> : <ArrowUpIcon />}
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             </>

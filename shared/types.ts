@@ -150,12 +150,24 @@ export interface PermissionMenu {
   options: { key: string; label: string }[];
 }
 
+/** Claude TUI permission modes reachable mid-session via Shift+Tab (verified by
+ *  spike). Bypass is launch-only and intentionally absent. The array order IS the
+ *  Shift+Tab cycle order — used to compute how many presses reach a target. */
+export type PermissionMode = "auto" | "accept-edits" | "plan";
+export const PERMISSION_MODES: PermissionMode[] = ["auto", "accept-edits", "plan"];
+export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
+  auto: "auto",
+  "accept-edits": "accept edits",
+  plan: "plan",
+};
+
 export interface PaneState {
   drivable: boolean; // the session is tmux-resident (can be answered)
   menu: PermissionMenu | null;
   raw: string;
   working: boolean; // the MAIN turn is in flight (live pane — control not yours yet)
   pendingSend: boolean; // a send is parked server-side (grace window) — any device
+  mode: PermissionMode | null; // current permission mode read off the pane (null if unknown)
 }
 
 // A slash command the suggester can offer. Non-authoritative: built-ins are a

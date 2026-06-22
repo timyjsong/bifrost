@@ -28,9 +28,15 @@ import { transcriptPathFor } from "./collectors/sessions";
 import { sessionStream } from "./drive/live";
 import { resolveTarget, liveTmuxSet } from "./drive/target";
 import { sendText, sendKey, capturePane } from "./drive/send";
-import { parsePermissionMenu, isValidAnswerKey, isPaneWorking } from "./drive/menu";
+import {
+  parsePermissionMenu,
+  isValidAnswerKey,
+  isPaneWorking,
+  parsePermissionMode,
+} from "./drive/menu";
 import { slashFor } from "./drive/slash";
 import { getDraft, setDraft } from "./drive/drafts";
+import { saveUpload, sweepUploads } from "./drive/uploads";
 import { schedule as scheduleSend, cancel as cancelSend, isPending } from "./drive/scheduled";
 import { getSettings, setSettings, type Settings } from "./settings";
 import { handleAlertRequest, evaluateAlerts } from "./alerts/manager";
@@ -486,6 +492,7 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
         raw: "",
         working: false,
         pendingSend: false,
+        mode: null,
       });
     let raw = "";
     try {
@@ -502,7 +509,46 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       // a send parked server-side (this device's grace window OR another device's)
       // → every polling device disables send for the whole in-flight window.
       pendingSend: isPending(sid),
+      mode: parsePermissionMode(raw),
     });
+  }
+  // Set the permission mode (auto / accept-edits / plan) by injecting Shift+Tab
+  // cycles. Reads the current mode off the pane, computes the press count, sends
+  // them. Bypass is launch-only (not in the TUI cycle) — rejected here.
+  const modeMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/mode$/);
+  if (modeMatch && req.method === "POST") {
+    const sid = decodeURIComponent(modeMatch[1]);
+    const body = (await req.json().catch(() => ({}))) as { mode?: unknown };
+    const target = body.mode;
+    if (target !== "auto" && target !== "accept-edits" && target !== "plan")
+      return Response.json({ ok: false, reason: "bad-mode" }, { status: 400 });
+    const sess = snapshot.sessions.find((s) => s.sessionId === sid);
+    const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
+    if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
+    let raw = "";
+    try {
+      raw = await capturePane(tgt.tmuxSession);
+    } catch {
+      /* pane vanished */
+    }
+    let cur = parsePermissionMode(raw);
+    if (!cur)
+      return Response.json({ ok: false, reason: "mode-unreadable" }, { status: 409 });
+    // Closed loop: press Shift+Tab once, re-read the pane, repeat until the mode
+    // matches. Robust against the TUI occasionally dropping a rapid press (an
+    // open-loop count of presses proved flaky). Bounded so it can never spin.
+    try {
+      for (let tries = 0; cur !== target && tries < 6; tries++) {
+        await sendKey(tgt.tmuxSession, "BTab"); // Shift+Tab
+        await new Promise((r) => setTimeout(r, 300)); // let Ink redraw
+        cur = parsePermissionMode(await capturePane(tgt.tmuxSession)) ?? cur;
+      }
+    } catch {
+      return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
+    }
+    if (cur !== target)
+      return Response.json({ ok: false, reason: "mode-switch-failed", mode: cur }, { status: 502 });
+    return Response.json({ ok: true, mode: cur });
   }
   // Answer a permission menu — a deliberately tiny surface (a digit or Enter),
   // validated, then routed as a key. A bad key is rejected, never sent.
@@ -560,6 +606,26 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       await setDraft(sid, text);
       return Response.json({ ok: true });
     }
+  }
+  // Attach files (drive composer). The TUI can't take binaries, so each file is
+  // saved under the gitignored data/uploads/<sessionId>/ and its PATH returned;
+  // the client injects the path(s) into the prompt for Claude to read. TTL-swept
+  // on each upload. Behind the global auth gate like every /api route.
+  const uploadMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/upload$/);
+  if (uploadMatch && req.method === "POST") {
+    const sid = decodeURIComponent(uploadMatch[1]);
+    const form = await req.formData().catch(() => null);
+    if (!form) return Response.json({ ok: false, reason: "bad-form" }, { status: 400 });
+    await sweepUploads(now); // TTL-clean older uploads whenever a new one lands
+    const files: { path: string; name: string }[] = [];
+    for (const value of form.getAll("file")) {
+      if (!(value instanceof File)) continue;
+      if (value.size > 25 * 1024 * 1024) continue; // 25MB cap — skip oversized
+      const bytes = new Uint8Array(await value.arrayBuffer());
+      const saved = await saveUpload(sid, value.name, bytes);
+      files.push({ path: saved.path, name: value.name }); // show the original name; path stays unique
+    }
+    return Response.json({ ok: true, files });
   }
   // App settings (currently the send grace period). Behind the global auth gate
   // like every /api route. GET reads, PUT merges a partial patch and echoes back.

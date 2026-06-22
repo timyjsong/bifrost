@@ -11,7 +11,7 @@
  * "❯" cursor on the selected row. We key on a run of sequentially-numbered
  * options starting at 1 — strong enough to ignore incidental numbered text.
  */
-import type { PermissionMenu } from "../../shared/types";
+import type { PermissionMenu, PermissionMode } from "../../shared/types";
 export type { PermissionMenu };
 
 // Strip box-drawing borders / cursor glyphs / padding so the option text is bare.
@@ -96,4 +96,16 @@ export function isPaneWorking(paneText: string): boolean {
   // so a stray "esc to interrupt" in transcript scrollback can't false-positive.
   const lines = paneText.split("\n").filter((l) => l.trim());
   return lines.slice(-6).some((l) => WORKING.test(l));
+}
+
+/** Read the current permission mode off a captured pane, or null if the status
+ *  line isn't visible. The TUI shows `⏵⏵ auto mode on`, `⏵⏵ accept edits on`, or
+ *  `⏸ plan mode on` (cycle + strings verified by spike). Plan is checked first so
+ *  its "mode on" can't be mistaken for auto. */
+export function parsePermissionMode(paneText: string): PermissionMode | null {
+  const t = paneText.toLowerCase();
+  if (/plan mode on/.test(t)) return "plan";
+  if (/accept edits on/.test(t)) return "accept-edits";
+  if (/auto mode on/.test(t)) return "auto";
+  return null;
 }
