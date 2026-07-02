@@ -1,14 +1,17 @@
 [Unit]
-Description=Bifrost — view-only control tower for the dev box
+Description=Bifrost — Claude Code dashboard
+# If you bind a Tailscale IP, keep tailscaled.service here so the address
+# exists before Bifrost starts; systemd ignores the entry if the unit is absent.
 After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
 Type=simple
+# Edit these four lines to match your box.
 User=you
 Group=you
 WorkingDirectory=/home/you/bifrost
-ExecStart=/home/you/.npm-global/bin/bun server/index.ts
+ExecStart=/home/you/.bun/bin/bun server/index.ts
 Restart=always
 RestartSec=5
 MemoryMax=300M

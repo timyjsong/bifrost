@@ -116,8 +116,7 @@ helps regardless of auth primitive.
   encrypting just moves the key problem).
 
 ## Standing rules
-- **NEVER Funnel Bifrost.** (Funnel currently routes to a separate secret-path-gated
-  service on `:18080`, not Bifrost — verified 2026-06-16. Keep it that way.)
+- **NEVER Funnel Bifrost** — it stays tailnet-only, no public route, ever.
 - Accepted residual: device compromise = full access (unavoidable for a personal tool).
 
 ## Verification (success criteria → tests)

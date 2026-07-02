@@ -1,8 +1,8 @@
 # Phase 1 (Build 1) — Drive existing sessions, end to end
 
-**Status:** REQUIREMENTS LOCKED — awaiting my greenlight (converged 2026-06-17).
-Build 0 (auth) shipped + converged. Decisions below are settled; the ACs are the
-contract. NO autonomous build starts until my explicit go.
+**Status: BUILT & CONVERGED** — greenlit 2026-06-17, shipped as Build 1 (all 8
+milestones), review cycle closed. This doc is the spec the build was greenlit
+against, kept unedited below; the ACs were the contract.
 
 **Why this slice:** smallest *useful* unit — turns Bifrost into a real Claude Code
 client for the already-tmuxed sessions. Touches NO new `claude` invocation (injects
