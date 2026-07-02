@@ -25,7 +25,7 @@ import {
   filterSlash,
   type UploadedFile,
 } from "../lib/drive";
-import { resolveKey } from "../lib/keymap";
+import { resolveKey, stopAction } from "../lib/keymap";
 import {
   buildToolIndex,
   summarizeTool,
@@ -569,7 +569,8 @@ export function DriveView({
   // Stop does double duty: within the grace window it CANCELS the parked send
   // (undo — text returns); once the turn is running it INTERRUPTS (Esc).
   const stop = async () => {
-    if (inGrace) {
+    const action = stopAction(inGrace ? "pending" : working ? "working" : "idle");
+    if (action === "cancel") {
       const parked = pending;
       setGraceUntil(null);
       const res = await cancelPrompt(session.sessionId);
@@ -584,7 +585,7 @@ export function DriveView({
       }
       return;
     }
-    if (!working) return; // nothing running to interrupt (idle / another device's send)
+    if (action !== "interrupt") return; // idle — nothing to stop
     if (interrupting) return;
     setInterrupting(true);
     setOptimistic(false); // flip toward send immediately

@@ -35,6 +35,7 @@ function Rail({
     { id: "system", label: "System", count: undefined, alert: 0 },
     { id: "alerts", label: "Alerts", count: undefined, alert: 0 },
     { id: "projects", label: "Projects", count: counts.projects, alert: 0 },
+    { id: "settings", label: "Settings", count: undefined, alert: 0 },
   ];
   return (
     <aside className="fixed inset-y-0 left-0 z-50 hidden w-48 flex-col border-r border-line-soft bg-bg/60 px-6 py-7 backdrop-blur-sm lg:flex">
@@ -190,7 +191,7 @@ function Dashboard() {
   // tapping a tab (or the needs-you pill) scrolls it. Inert on desktop, where
   // the track reverts to a vertical stack and these never fire.
   // Projects sits leftmost on mobile, but the carousel OPENS on Sessions — so
-  // Sessions is the mobile visual index 1 (Projects 0, System 2, Alerts 3).
+  // Sessions is the mobile visual index 1 (Projects 0, System 2, Alerts 3, Settings 4).
   const SESSIONS_PANE = 1;
   const trackRef = useRef<HTMLDivElement>(null);
   const [active, setActive] = useState(SESSIONS_PANE);
@@ -432,7 +433,7 @@ function Dashboard() {
         </div>
 
         <footer className="mt-16 hidden items-baseline justify-between border-t border-line-soft pt-4 text-[11px] text-ink-mute lg:flex">
-          <span>view-only by design — bifrost watches, it doesn't poke</span>
+          <span>watches the whole box — drives the sessions you choose</span>
           <span className="font-mono text-[10.5px] text-ink-mute/60">
             {sys.hostname}
           </span>

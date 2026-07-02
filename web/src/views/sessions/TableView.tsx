@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { SessionInfo } from "../../../../shared/types";
 import { basename, fmtTokens, relTime } from "../../lib/format";
+import { gaugeModel } from "../../lib/cardModel";
 import { queueStatusOf } from "../../lib/selectors";
 import { Bar, Dot, Panel } from "../../components/ui";
 import { SummaryBlock } from "../../components/SummaryBlock";
@@ -32,6 +33,7 @@ function Row({
 }) {
   const [open, setOpen] = useState(false);
   const st = stateLabel(s, now);
+  const gauge = gaugeModel(s);
   const needsYou = s.state === "awaiting" || s.state === "approval";
   return (
     <div
@@ -61,15 +63,8 @@ function Row({
         </span>
         <span className={`w-28 shrink-0 text-[11px] ${st.cls}`}>{st.text}</span>
         <span className="hidden w-24 shrink-0 lg:block">
-          {s.contextTokens !== undefined && (
-            <Bar
-              ratio={s.contextTokens / (s.contextWindow ?? 200_000)}
-              tone={
-                s.contextTokens / (s.contextWindow ?? 200_000) > 0.75
-                  ? "danger"
-                  : "gold"
-              }
-            />
+          {gauge && (
+            <Bar ratio={gauge.ratio} tone={gauge.danger ? "danger" : "gold"} />
           )}
         </span>
         <span className="w-14 shrink-0 font-mono text-[11px] text-ink-mute tabular-nums">

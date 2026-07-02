@@ -9,7 +9,6 @@ const sources = (over: Partial<AlertSources> = {}): AlertSources => ({
   oomKill: 0,
   ramWall: 0,
   swapPct: 0,
-  swapCurrentKb: 0,
   psiMemSome: 0,
   servicesDown: [],
   limitsHealthy: true,

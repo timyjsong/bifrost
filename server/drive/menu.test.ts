@@ -6,9 +6,9 @@ import {
   parsePermissionMode,
 } from "./menu";
 
-// Fixture mirrors the assumed Claude Code permission dialog (boxed, ❯ cursor).
-// NOTE: confirm against a live prompt at review — if the real format differs,
-// this fixture and the parser update together, and the loud fallback covers the gap.
+// Fixture mirrors the live Claude Code permission dialog (boxed, ❯ cursor).
+// If the format drifts in a future Claude Code, this fixture and the parser
+// update together, and the loud fallback covers the gap.
 const BOXED = `
 ╭───────────────────────────────────────────────╮
 │ Bash command                                  │

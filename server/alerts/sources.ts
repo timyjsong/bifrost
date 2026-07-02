@@ -19,7 +19,6 @@ export interface AlertSources {
   oomKill: number; // cgroup memory.events oom_kill (monotonic)
   ramWall: number; // cgroup memory.events 'max' — allocations refused (monotonic)
   swapPct: number; // slice swap.current / swap.max, 0..100
-  swapCurrentKb: number;
   psiMemSome: number; // /proc/pressure/memory  some avg10
   servicesDown: string[]; // watched units currently failed/inactive
   limitsHealthy: boolean; // the safeguard itself
@@ -113,7 +112,6 @@ export async function collectAlertSources(): Promise<AlertSources> {
     oomKill: events.get("oom_kill") ?? 0,
     ramWall: events.get("max") ?? 0,
     swapPct,
-    swapCurrentKb: swapCur !== null ? Math.round(swapCur / 1024) : 0,
     psiMemSome: psiMem,
     servicesDown,
     limitsHealthy,

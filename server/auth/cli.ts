@@ -5,9 +5,10 @@
  * `revoke-all` manage enrolled devices. The running server honors every change
  * live (the token store is mtime-cached).
  *
- *   bun server/auth/cli.ts enroll [label]
+ *   bun server/auth/cli.ts enroll
  *   bun server/auth/cli.ts list
  *   bun server/auth/cli.ts revoke <label>
+ *   bun server/auth/cli.ts revoke-id <id>
  *   bun server/auth/cli.ts revoke-all
  */
 import { loadConfig } from "../config";
@@ -72,7 +73,7 @@ if (cmd === "enroll") {
   console.log("Revoked all devices. Every device must re-enroll.");
 } else {
   console.error(
-    "usage: bun server/auth/cli.ts <enroll [label] | list | revoke <label> | revoke-id <id> | revoke-all>",
+    "usage: bun server/auth/cli.ts <enroll | list | revoke <label> | revoke-id <id> | revoke-all>",
   );
   process.exit(1);
 }

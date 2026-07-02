@@ -5,7 +5,7 @@
  * guess — it shows the raw pane and routes you to the prompt box / raw terminal
  * (the loud fallback, AC5.3). A wrong auto-answer is the one outcome we refuse.
  *
- * Format assumption (to be confirmed against a LIVE prompt at review): the
+ * Format (confirmed against live permission prompts): the
  * permission dialog renders a question line ending in "?", then numbered choices
  * "1. Yes …", "2. …", "3. No …", optionally inside a box-drawing frame with a
  * "❯" cursor on the selected row. We key on a run of sequentially-numbered
