@@ -1,114 +1,78 @@
 # Bifrost
 
-A local web dashboard for the `dev` box — **a single pane over everything in motion**: the projects you have, which ones have live Claude Code sessions running, what's in progress, and (later) a way to interact with those sessions from the GUI itself.
+A self-hosted control tower for [Claude Code](https://claude.com/claude-code) on a dev box — one pane over every project and live session, driveable from any device on your tailnet.
 
-> The central space every room opens onto — every project, session, and doc surfaces into one room you walk into.
+Bifrost watches the whole machine — every Claude Code session (interactive or background), every project, system pressure — and lets you **drive** the interactive ones from a phone: send prompts, answer permission menus, interrupt a turn, or drop into a raw terminal mirror. Installed as a PWA, it pushes a notification when a session needs you; tapping it deep-links into the exact session waiting for an answer.
 
-**Live at `http://100.100.100.100:4444`** (tailnet only).
+## How it was built
 
-## Scope
+Bifrost is agent-built: implemented end-to-end in Claude Code sessions under a documented working agreement — requirements converged with the owner, builds run autonomously, then a review cycle iterates until convergence. Every convergence ships contract tests for that cycle's logic (tests encode the requirement, never the implementation). The commit history is the build log: per-milestone commits, honest co-author trailers.
 
-- **Now (v1):** read-only display — observe projects, sessions, and progress at a glance. Read-only by design; other Claude sessions run on this box concurrently, so the dashboard watches, it doesn't poke at tmux or services.
-- **Spans realms:** `~/projects` + `~/work` today; more realms (`~/docs`, `~/skills`, …) are one config line each — the lens *over* the box, which is why it lives at root rather than inside `~/projects/`.
-- **Later:** interactive — drive and steer Claude Code sessions from the GUI.
+## Features
 
-## Hard constraint (amended v1.1)
+**Sessions — the live board.** Every session on the box as a card (or table row): activity state (`needs you` / `approval` / `paused` / `working`) derived disk-first from the transcript tail and corroborated against `/proc`; residence (tmux / ssh / desktop) and model chips; a switch-aware context-window gauge resolved per session (from `/model` events, launch flags, then heuristics — a guess renders as `~`, never as measured). Subprocess attribution names fan-out agents and background tasks from transcript tool calls matched against live cmdlines — including orphans reparented to init, recovered via task-output fd links. WHERE / MODEL / ACTIVE filters compose over it all.
 
-**Bifrost must never invoke `claude -p`, headless mode, or the Agent SDK.** From 2026-06-15, programmatic Claude Code usage bills to a separate credit bucket.
+**Drive — interact from anywhere.** Open a session and the transcript renders live (SSE, collapsible tool calls, markdown). Type with local echo and cross-device draft sync; send is commit-to-send with a cancelable grace window. Interrupt maps to Esc (never Ctrl-C). Permission prompts are parsed from the pane and answered with a tap — with a loud fallback to the raw view when parsing isn't sure, because the one forbidden outcome is a silent wrong answer. Plus: slash-command suggester, permission-mode pill (auto / edits / plan), file attach, and an xterm.js raw-terminal mirror as the always-works escape hatch.
 
-**One sanctioned exception (v1.1, my call 2026-06-11):** the summarize feature dispatches `claude --bg --model haiku` — background sessions are interactive-class (I accepted the residual billing ambiguity; locally corroborated by bg pid files carrying a non-SDK entrypoint). The dispatch happens **only on an explicit button click**, never automatically. Everything else stays read-only: files + `/proc`.
+**Alerts + push.** A pure signal engine (edge / gauge / rate / transition kinds, hysteresis, per-instance latching) maps 12 tunable signals to Web Push notifications that deliver off-tailnet. Session-scoped alerts deep-link straight into the drive view.
+
+**Summaries.** One click condenses a transcript via a background Claude session, behind an adaptive queue sized from box RAM; results cache by source mtime.
+
+**Projects + files.** Realm-scoped project cards (branch, dirty state, activity) and a read-only file browser where every path is realpath-confined to a live project root — traversal and symlink escapes resolve outside and are rejected.
+
+**Auth.** Fail-closed device enrollment: QR code with a single-use TTL enrollment code trades for a 256-bit constant-time device token; per-IP throttle; host/origin allowlists (anti DNS-rebinding / CSRF); CSP on every response; revocation is honored live, including mid-SSE-stream.
+
+## Design constraints
+
+- **No headless Claude.** Bifrost never invokes `claude -p` or the Agent SDK (a hard project constraint — programmatic usage bills separately). It observes via disk and `/proc`, and interacts by injecting into *interactive* sessions through tmux. The one sanctioned exception: summaries dispatch an interactive-class background session, click-initiated only.
+- **Latency in transport, not interaction.** Input is local-echo and commit-to-send; keystrokes never cross the wire one at a time.
+- **Single-user, tailnet-only.** The deployment posture is a private network; auth exists so a lost phone isn't a lost box.
+- **No database.** One Bun process; everything is read live from disk and `/proc` with mtime-keyed caches.
 
 ## Architecture
 
-One Bun process, no database. Everything is read live from disk and `/proc`, with mtime-keyed caches.
-
 ```
-server/               Bun + TypeScript (run natively, no build step)
-  index.ts            HTTP + SSE + static serving of web/dist
-  collectors/
-    sessions.ts       ~/.claude/sessions/<pid>.json (+ /proc liveness, pid-reuse guard)
-                      ~/.claude/projects/*/<id>.jsonl (head: title/cwd; tail: context tokens, model)
-    projects.ts       realm dirs: git branch/dirty/last-commit, README blurb, activity
-    system.ts         /proc/{loadavg,meminfo,uptime}, ps, tmux, ss
-web/                  Vite + React 19 + Tailwind v4 + Motion SPA (editorial dark)
-shared/types.ts       one Snapshot type, used by both sides
+server/                Bun + TypeScript (run natively, no build step)
+  index.ts             HTTP + SSE + static serving of web/dist
+  collectors/          sessions (transcripts + /proc), projects (git), system
+  drive/               transcript parser, tmux send/target validation, pane menu
+                       parser, drafts, slash scan, uploads
+  alerts/              signal derivation, pure alert engine, Web Push, VAPID
+  auth/                guard, tokens, enrollment, throttle + enroll CLI
+  files/               realpath-confined read-only browser
+web/                   Vite + React 19 + Tailwind v4 + Motion SPA (editorial dark)
+shared/                one Snapshot type, used by both sides
 deploy/bifrost.service systemd unit
 ```
 
-- **Fast tick (3s):** sessions + system → snapshot → pushed to browsers over SSE (`/api/events`).
-- **Slow tick (30s):** project/git scans + full transcript-index sweep.
-- **Sessions are box-wide;** the Projects pane shows only allowlisted realms.
-- Headless (sdk-driven) sessions are detected via `entrypoint` and shown collapsed.
-- **Activity state** (v1.1): derived disk-first from the transcript tail (last entry type + open
-  tool calls), corroborated by child-process count (ps ppid tree), per-pid CPU deltas, and the
-  pid-file `status` when fresh. States: `awaiting` (turn over, nothing running — the NEEDS YOU
-  group), `approval` (dangling tool call, no children, CPU-quiet — likely a permission prompt),
-  `paused` (turn over but spawned processes still out), `working`.
-- **Residence + identity** (v1.2): tmux membership by matching the pid's tty against
-  `tmux list-panes` (session name + attached state); direct-ssh by live sshd ancestor; session
-  names from transcript `custom-title` entries. Subprocesses are named from a rolling
-  per-session index of described tool calls (main transcript + subagent sidechains) matched
-  against full /proc cmdlines up the wrapper chain; bg tasks via stdout fd → task output.
-  Per-process CPU is instantaneous box-share (all cores = 100) from jiffy deltas per tick.
-- **Background agents** (v1.2): a live `claude -p` (cmdline check — pid files of
-  desktop-spawned agents falsely claim interactive) is never shown as an interactive session;
-  when its stdout links to `…/<ownerSession>/tasks/<id>.output` it's absorbed onto the owner's
-  card as a named child.
-- **Summaries** (v1.1): `POST /api/sessions/:id/summarize` condenses the transcript server-side,
-  dispatches `claude --bg --model haiku`, polls the bg transcript for the result, `claude rm`s
-  the session, and caches to `~/.cache/bifrost/summaries` keyed by source mtime. Known limitation:
-  a *detached* daemon (nohup, reparented to init) is invisible to the child-process check.
-- **Context windows** (v1.3): per live session, switch-aware, resolved in tiers — last
-  `/model` stdout log (ANSI-stripped; sticky via a one-time full-transcript scan + tail
-  updates) → `--model` launch flag from the live cmdline → `~/.claude.json` lastModelUsage
-  when unambiguous → labeled 200K lookup, rendered with `~`. Model→window map pinned
-  empirically: Fable 5 = 1M unconditionally; `[1m]` / "(1M context)" = 1M; other bases 200K.
-  Reference implementation vendored at `tools/context-meter.py` (kept in sync with ledger-api's).
-- **Filters + product chrome** (v1.3): WHERE/MODEL/ACTIVE pill filters over the live
-  sessions (pure logic in `web/src/lib/sessionFilters.ts`); fixed glass command bar with
-  pressure meters; state stripes, ×N child folding, and gauge semantics in
-  `web/src/lib/cardModel.ts`. Classification (residence, model family) is single-sourced
-  in those libs — chips, pills, and filters cannot drift apart.
+- **Fast tick (3s):** sessions + system → snapshot → pushed to browsers over SSE.
+- **Slow tick (30s):** project/git scans + transcript-index sweep.
+- Session presentation is swappable: `web/src/lib/selectors.ts` shapes the data, `web/src/views/sessions/` holds the views behind a registry — a new view is one component and one registry line.
 
 ## Tests
 
-`bun run check` (repo root) runs the unit suite plus server and web typechecks. The suite
-covers the logic layer — transcript parsing, state derivation, process trees, the summarize
-queue (with injected seams), spec-derived scaling, selectors, formatters, window resolution,
-filters, and the card view-model (contract tests). Pure presentation is verified by eyeball;
-any *logic* a cycle adds ships with tests in the convergence commit (CLAUDE.md rule 7).
-
-## Swappable views
-
-Session presentation is decoupled from data: `web/src/lib/selectors.ts` shapes the snapshot
-into groups, and `web/src/views/sessions/` holds the presentations (`cards`, `table`) behind
-a registry. A new view (graph, timeline, …) is one component + one registry line. The
-toggle persists per-browser.
+`bun run check` runs the unit suite (305 tests across 31 files) plus server and web typechecks. The suite covers the logic layer — transcript parsing, state derivation, process trees, target validation, menu parsing, the summarize queue, auth (guard / tokens / enrollment / throttle), window resolution, filters, and the card view-model. Pure presentation is verified by eyeball; any logic a cycle adds ships with tests in that convergence commit.
 
 ## Run
 
+Requires [Bun](https://bun.sh), Linux (`/proc`), tmux, and Claude Code on the box.
+
 ```sh
-cd web && bun install && bun run build   # build the frontend once
-bun server/index.ts                      # serve everything on :4444
+cp bifrost.config.example.json bifrost.config.json   # then edit: bind host, realms, auth allowlists
+cd web && bun install && bun run build && cd ..      # build the frontend once
+bun install
+bun server/index.ts                                  # serve everything
+bun run enroll                                       # mint a QR enrollment code for a device
 ```
 
 Dev loop for the frontend: `cd web && bun run dev` (proxies `/api` to the running server).
 
-## Deploy (24/7)
+Deploy 24/7 with the included systemd unit (`deploy/bifrost.service`). Footprint: ~52MB RSS, ~0% CPU idle.
 
-```sh
-sudo cp deploy/bifrost.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bifrost
-```
+## Status
 
-Footprint: ~52MB RSS, ~0% CPU idle.
+v1 is shipped and in daily use: the full observe layer plus drive-existing-sessions. Session lifecycle (originate / resume / restart from the dashboard) is under active development on a local branch and lands here once it converges through review.
 
-## Config — `bifrost.config.json`
+## License
 
-| key | meaning |
-| --- | --- |
-| `bind` | host/port to serve on (tailnet IP by default) |
-| `realms` | allowlisted project roots shown in the Projects pane |
-| `refresh` | fast/slow tick intervals (ms) |
-| `sessions` | history window (days) and max rows |
+MIT

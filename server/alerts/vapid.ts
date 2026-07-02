@@ -7,7 +7,7 @@ import webpush from "web-push";
 import { readJson, writeJsonAtomic } from "./store";
 
 const FILE = "vapid.json";
-const SUBJECT = "mailto:admin@example.com";
+const SUBJECT = process.env.BIFROST_VAPID_SUBJECT ?? "mailto:admin@example.com";
 
 export interface Vapid {
   subject: string;

@@ -1,5 +1,6 @@
 node_modules/
 web/dist/
+bifrost.config.json
 *.log
 .env
 data/

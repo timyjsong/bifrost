@@ -1,0 +1,29 @@
+{
+  "bind": { "host": "100.100.100.100", "port": 4444 },
+  "realms": [
+    { "name": "projects", "path": "~/projects" },
+    { "name": "work", "path": "~/work" }
+  ],
+  "claudeDir": "~/.claude",
+  "refresh": { "fastMs": 3000, "slowMs": 30000 },
+  "sessions": { "historyDays": 14, "maxHistory": 60 },
+  "summarize": {
+    "claudeBin": "/home/you/.local/bin/claude",
+    "model": "sonnet",
+    "effort": "low",
+    "fastStartArgs": ["--strict-mcp-config"],
+    "scratchDir": "~/.cache/bifrost/bg",
+    "cacheDir": "~/.cache/bifrost/summaries",
+    "perJobMb": 250,
+    "ramShare": 0.33,
+    "memReservePct": 0.15,
+    "maxInFlightCap": 12,
+    "maxQueue": 40,
+    "timeoutMs": 120000
+  },
+  "auth": {
+    "origins": ["http://100.100.100.100:4444", "https://your-host.your-tailnet.ts.net:8444"],
+    "hosts": ["100.100.100.100:4444", "your-host.your-tailnet.ts.net:8444"],
+    "enrollUrl": "https://your-host.your-tailnet.ts.net:8444"
+  }
+}
