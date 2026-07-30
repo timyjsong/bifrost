@@ -124,7 +124,10 @@ async function historyText(): Promise<string> {
     if (!sha) continue;
     const path = rest.join(" ");
     if (path) paths.push(path);
-    if (path && !BINARY_EXT.test(path)) blobs.push(sha);
+    // Binaries and compressed artifacts included: excluding them from history
+    // meant a blob committed then deleted was read by no check at all. They are
+    // decoded latin1 below so their printable strings survive.
+    if (path) blobs.push(sha);
   }
 
   const proc = Bun.spawn(["git", "-C", repoRoot, "cat-file", "--batch"], {
@@ -134,7 +137,11 @@ async function historyText(): Promise<string> {
   });
   proc.stdin.write(blobs.join("\n") + "\n");
   proc.stdin.end();
-  const dumped = await new Response(proc.stdout).text();
+  // latin1, not utf8: a binary decoded as utf8 turns into replacement
+  // characters and its embedded strings vanish. This keeps every byte legible
+  // as a character, which is all the patterns need.
+  const buf = await new Response(proc.stdout).arrayBuffer();
+  const dumped = new TextDecoder("latin1").decode(buf);
   await proc.exited;
   return dumped + "\n" + paths.join("\n");
 }
@@ -540,6 +547,10 @@ describe("reality: fixtures do not name anything on this machine", () => {
       [CGNAT, (v) => v === PLACEHOLDER.cgnat],
       [UUID, (v) => FIXTURE_UUIDS.has(v.toLowerCase())],
       [OPAQUE_ID, () => false],
+      // Present in the working-tree scan but omitted here, which meant a value
+      // only ever committed in an older revision was checked by nothing.
+      [EMAIL, (v) => v.endsWith(PLACEHOLDER.emailDomain) || v.endsWith(PLACEHOLDER.noreplyDomain)],
+      [CONCAT_HOME, () => false],
     ];
     for (const [pat, ok] of checks) {
       for (const m of text.matchAll(pat)) if (!ok(m[0])) offenders.push(m[0]);
