@@ -226,10 +226,15 @@ export function _setTestSeams(seams: {
   mem?: typeof memInfoImpl;
   job?: typeof jobRunner;
   lookup?: typeof sourceLookup;
+  /** The cgroup ceiling. Injectable because it is read from the HOST, and a
+   *  queue test that reads the host is a test of wherever it happens to run —
+   *  it passed on an uncapped cgroup and failed under a capped one. */
+  cgroupMb?: number | null;
 }): void {
   if (seams.mem) memInfoImpl = seams.mem;
   if (seams.job) jobRunner = seams.job;
   if (seams.lookup) sourceLookup = seams.lookup;
+  if (seams.cgroupMb !== undefined) cgroupCeilingMb = seams.cgroupMb;
 }
 
 /** Test-only: clear all queue state so tests are isolated. */
@@ -258,8 +263,10 @@ function memInfo(): { totalMb: number; availMb: number } {
 }
 memInfoImpl = memInfo;
 
-/** The unit's MemoryMax does not change while the process runs, so read it once. */
-const cgroupCeilingMb = readOwnCgroupMaxMb();
+/** The unit's MemoryMax does not change while the process runs, so read it once.
+ *  Not `const`: tests inject it, because otherwise the queue's behaviour depends
+ *  on whatever cgroup the suite happens to run under. */
+let cgroupCeilingMb = readOwnCgroupMaxMb();
 
 /**
  * Read the memory ceiling of the cgroup THIS process runs in, in MB.

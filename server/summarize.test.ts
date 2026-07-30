@@ -160,6 +160,9 @@ describe("queue mechanics (with injected seams)", () => {
     started = [];
     mem = { totalMb: 3891, availMb: 2000 }; // healthy 3.8G box -> 5 slots
     _setTestSeams({
+      // No cgroup ceiling: this block tests the queue against the injected box
+      // size, so the host's own cgroup must not leak into the derivation.
+      cgroupMb: null,
       mem: () => mem,
       lookup: { path: (id) => `/fake/${id}.jsonl`, mtime: () => 1 },
       job: (_c, id) => {
