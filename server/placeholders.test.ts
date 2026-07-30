@@ -654,6 +654,23 @@ describe("reality: fixtures do not name anything on this machine", () => {
         for (let i = 0; i + 12 <= bare.length; i += 4) realFragments.add(bare.slice(i, i + 12));
       }
     }
+    // Upload ids too. They are hex prefixes on stored attachment filenames, not
+    // session ids, so harvesting only the projects tree missed them — which is
+    // how one reached publication inside a fixture path.
+    for (const base of [join(homedir(), "bifrost", "data", "uploads")]) {
+      if (!existsSync(base)) continue;
+      try {
+        for (const sess of readdirSync(base)) {
+          for (const f of readdirSync(join(base, sess))) {
+            const m = f.match(/^([0-9a-f]{8,})-/i);
+            if (m) realFragments.add(m[1].toLowerCase());
+          }
+        }
+      } catch {
+        /* unreadable */
+      }
+    }
+
     if (!realFragments.size) return skipNotice();
 
     // Working tree AND history: a value not yet committed is still a value
