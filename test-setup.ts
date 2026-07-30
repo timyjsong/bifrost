@@ -6,10 +6,21 @@
 // auth tests' mintToken/revokeAll write to the REAL data/ dir and wipe enrolled
 // devices. Pointing the whole test process at a throwaway temp dir here is the
 // only place guaranteed to run before those frozen reads.
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { afterAll } from "bun:test";
+import { tempDir, sweepTempDirs } from "./server/testing/tmp";
 
 if (!process.env.BIFROST_DATA_DIR) {
-  process.env.BIFROST_DATA_DIR = mkdtempSync(join(tmpdir(), "bifrost-test-"));
+  process.env.BIFROST_DATA_DIR = tempDir("bifrost-test");
 }
+
+// Global teardown for every temp dir handed out by testing/tmp.ts. It lives
+// here rather than in the helper because `process.on("exit")` does not fire
+// under the test runner — the suite had left hundreds of directories in /tmp.
+afterAll(async () => {
+  // Two passes with a drain between. A store write started inside a test but not
+  // awaited by it (the session index persists itself) lands after the first
+  // sweep and recreates the data dir; the second pass is what actually gets it.
+  sweepTempDirs();
+  await new Promise((r) => setTimeout(r, 100));
+  sweepTempDirs();
+});

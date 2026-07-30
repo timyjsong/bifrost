@@ -1,6 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   deriveMaxInFlight,
@@ -12,6 +11,7 @@ import {
   type SummaryResult,
 } from "./summarize";
 import type { BifrostConfig } from "./config";
+import { tempDir } from "./testing/tmp";
 
 const cfg = (over: Partial<BifrostConfig["summarize"]> = {}): BifrostConfig =>
   ({
@@ -21,7 +21,7 @@ const cfg = (over: Partial<BifrostConfig["summarize"]> = {}): BifrostConfig =>
       effort: "low",
       fastStartArgs: [],
       scratchDir: "/tmp/nonexistent-scratch",
-      cacheDir: mkdtempSync(join(tmpdir(), "bifrost-cache-")),
+      cacheDir: tempDir("bifrost-cache-"),
       perJobMb: 250,
       ramShare: 0.33,
       memReservePct: 0.15,
@@ -49,9 +49,58 @@ describe("deriveMaxInFlight scales with the box", () => {
   });
 });
 
+// The jobs are plain child processes, so they live in the SERVICE's cgroup, not
+// the box. Sizing against the box let MemoryMax and maxInFlightCap drift apart
+// with nothing enforcing the relationship — 2G/cap-12 would happily admit 12
+// × 250MB jobs into a 2G ceiling and let the kernel sort it out.
+describe("deriveMaxInFlight honours the cgroup ceiling when there is one", () => {
+  const c = cfg();
+
+  test("a 2G ceiling on a 23G box sizes to the ceiling, not the box", () => {
+    // box alone would derive 30 (clamped to the cap); the ceiling allows 6.
+    expect(deriveMaxInFlight(c, 23_400, null)).toBe(12);
+    expect(deriveMaxInFlight(c, 23_400, 2048)).toBe(6);
+  });
+
+  test("memReservePct is held back for Bifrost's own footprint", () => {
+    // 2048 * 0.85 = 1740.8 -> 6 jobs of 250MB, leaving room for the service.
+    expect(deriveMaxInFlight(cfg({ memReservePct: 0.15 }), 23_400, 2048)).toBe(6);
+    expect(deriveMaxInFlight(cfg({ memReservePct: 0.5 }), 23_400, 2048)).toBe(4);
+  });
+
+  test("the cap still wins when the ceiling is generous", () => {
+    expect(deriveMaxInFlight(cfg({ maxInFlightCap: 4 }), 23_400, 8192)).toBe(4);
+  });
+
+  // The [2, …] floor exists so an unreadable /proc/meminfo still makes progress.
+  // Against a REAL ceiling it must not apply: forcing a second job into a
+  // ceiling that fits one is the exact overcommit this is meant to prevent.
+  test("a ceiling too small for two jobs yields one, not the box floor of two", () => {
+    expect(deriveMaxInFlight(c, 23_400, 400)).toBe(1);
+    expect(deriveMaxInFlight(c, 23_400, 600)).toBe(2);
+  });
+
+  test("an uncapped cgroup falls back to the box", () => {
+    expect(deriveMaxInFlight(c, 3891, null)).toBe(5);
+    expect(deriveMaxInFlight(c, 3891, 0)).toBe(5); // 0 = no ceiling read
+  });
+
+  // The relationship the unit file documents: ~150M for Bifrost plus
+  // maxInFlightCap x perJobMb must fit inside MemoryMax. Now derived, not hoped.
+  test("the derived concurrency always fits inside the ceiling", () => {
+    for (const ceiling of [512, 1024, 2048, 4096, 8192]) {
+      for (const perJobMb of [128, 250, 400]) {
+        const n = deriveMaxInFlight(cfg({ perJobMb, maxInFlightCap: 99 }), 23_400, ceiling);
+        // one job may exceed a tiny ceiling (floor of 1); beyond that it must fit
+        if (n > 1) expect(n * perJobMb).toBeLessThanOrEqual(ceiling);
+      }
+    }
+  });
+});
+
 describe("extractConversation", () => {
   test("keeps typed prompts and assistant text, skips wrappers and tool noise", async () => {
-    const path = join(mkdtempSync(join(tmpdir(), "bifrost-x-")), "t.jsonl");
+    const path = join(tempDir("bifrost-x-"), "t.jsonl");
     writeFileSync(
       path,
       [
@@ -86,7 +135,7 @@ describe("extractConversation", () => {
     expect(convo).not.toContain("tool_result");
   });
   test("caps long conversations with an ellipsis marker", async () => {
-    const path = join(mkdtempSync(join(tmpdir(), "bifrost-y-")), "t.jsonl");
+    const path = join(tempDir("bifrost-y-"), "t.jsonl");
     const big = Array.from({ length: 100 }, (_, i) =>
       JSON.stringify({
         type: "user",
@@ -124,7 +173,7 @@ describe("queue mechanics (with injected seams)", () => {
     resolvers.get(id)!({ summary: "s", asOf: 1, cached: false });
 
   test("runs up to the derived limit, queues the rest FIFO, drains on completion", async () => {
-    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "bifrost-q-")) });
+    const c = cfg({ cacheDir: tempDir("bifrost-q-") });
     const ids = ["a", "b", "c", "d", "e", "f", "g"];
     const promises = ids.map((id) => summarizeSession(c, id));
     await Bun.sleep(1);
@@ -143,7 +192,7 @@ describe("queue mechanics (with injected seams)", () => {
   });
 
   test("dedupes concurrent requests for the same session", async () => {
-    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "bifrost-q2-")) });
+    const c = cfg({ cacheDir: tempDir("bifrost-q2-") });
     const p1 = summarizeSession(c, "same");
     const p2 = summarizeSession(c, "same");
     await Bun.sleep(1);
@@ -154,7 +203,7 @@ describe("queue mechanics (with injected seams)", () => {
   });
 
   test("holds the queue when memory is below the reserve, resumes when freed", async () => {
-    const c = cfg({ cacheDir: mkdtempSync(join(tmpdir(), "bifrost-q3-")) });
+    const c = cfg({ cacheDir: tempDir("bifrost-q3-") });
     mem = { totalMb: 3891, availMb: 100 }; // below 15% reserve (~584M)
     const p = summarizeSession(c, "held");
     await Bun.sleep(5);
@@ -169,7 +218,7 @@ describe("queue mechanics (with injected seams)", () => {
 
   test("rejects beyond the queue depth cap", async () => {
     const c = cfg({
-      cacheDir: mkdtempSync(join(tmpdir(), "bifrost-q4-")),
+      cacheDir: tempDir("bifrost-q4-"),
       maxQueue: 6,
     });
     const ps = ["1", "2", "3", "4", "5", "6"].map((id) =>

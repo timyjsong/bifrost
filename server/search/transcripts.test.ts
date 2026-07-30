@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { tempDir } from "../testing/tmp";
 import {
   searchTranscripts,
   snippetAround,
@@ -72,10 +73,9 @@ describe("snippetFromLines — text hits only", () => {
 
 describe("searchTranscripts — bounded, newest-first, payload-only dropped", () => {
   test("maps files to hits with sessionId + slug; payload-only files are dropped", async () => {
-    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
-    const { tmpdir } = await import("node:os");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
     const { join } = await import("node:path");
-    const root = mkdtempSync(join(tmpdir(), "bifrost-search-"));
+    const root = tempDir("bifrost-search-");
     mkdirSync(join(root, "-slug-a"));
     mkdirSync(join(root, "-slug-b"));
     const fa = join(root, "-slug-a", "aaaa1111-0000-0000-0000-000000000000.jsonl");

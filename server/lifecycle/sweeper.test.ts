@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { inflightJobFor, killForPark, parseParkLog, queuedOpPending } from "./sweeper";
+import { tempDir } from "../testing/tmp";
 
 describe("parseParkLog — the observe-log tail → entries (arming-readiness surface)", () => {
   const L = (o: unknown) => JSON.stringify(o) + "\n";
@@ -58,7 +58,7 @@ describe("queuedOpPending — §3.3 hard-block (queued input dies on park)", () 
 
 describe("inflightJobFor — §3.2 hard-block", () => {
   test("an inFlight job owned by the uuid blocks; others don't", () => {
-    const jobs = mkdtempSync(join(tmpdir(), "bifrost-jobs-"));
+    const jobs = tempDir("bifrost-jobs-");
     mkdirSync(join(jobs, "j1"));
     writeFileSync(join(jobs, "j1", "state.json"), JSON.stringify({ inFlight: true, resumeSessionId: "u-1" }));
     mkdirSync(join(jobs, "j2"));

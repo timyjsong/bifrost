@@ -258,14 +258,71 @@ function memInfo(): { totalMb: number; availMb: number } {
 }
 memInfoImpl = memInfo;
 
-/** Concurrency derived from live total RAM: how many ~perJobMb jobs fit in the
- *  share of memory summaries are allowed, clamped to [2, cap]. Scales with the box. */
-export function deriveMaxInFlight(cfg: BifrostConfig, totalMb: number): number {
+/** The unit's MemoryMax does not change while the process runs, so read it once. */
+const cgroupCeilingMb = readOwnCgroupMaxMb();
+
+/**
+ * Read the memory ceiling of the cgroup THIS process runs in, in MB.
+ *
+ * Summarize jobs are plain `Bun.spawn` children, so they stay inside the
+ * service's own cgroup — which means the unit's `MemoryMax`, not the size of the
+ * box, is what actually bounds them. Returns null when there is no ceiling
+ * (`max`) or the files can't be read; the caller falls back to the box.
+ */
+export function readOwnCgroupMaxMb(
+  root = "/sys/fs/cgroup",
+  selfCgroup = "/proc/self/cgroup",
+): number | null {
+  try {
+    // cgroup v2: a single `0::/the/path` line.
+    const rel = readFileSync(selfCgroup, "utf8")
+      .split("\n")
+      .map((l) => l.match(/^0::(.*)$/)?.[1])
+      .find((p) => p !== undefined);
+    if (!rel) return null;
+    const raw = readFileSync(join(root, rel, "memory.max"), "utf8").trim();
+    if (raw === "max" || raw === "") return null; // uncapped — the box is the bound
+    const bytes = Number(raw);
+    if (!Number.isFinite(bytes) || bytes <= 0) return null;
+    return Math.round(bytes / 1024 / 1024);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How many summarize jobs may run at once.
+ *
+ * Prefers the cgroup ceiling when there is one. Deriving from total system RAM
+ * was wrong in a way that stayed hidden: the jobs live in the service's cgroup,
+ * so on a 23G box behind a 2G `MemoryMax` the derivation happily sized itself
+ * against 23G and only `maxInFlightCap` kept it honest — a cap nothing enforced
+ * any relationship with. Raise the cap (or perJobMb) without raising MemoryMax
+ * and the kernel OOM-kills inside the cgroup, possibly picking Bifrost itself
+ * rather than the job.
+ *
+ * `memReservePct` of the ceiling is held back for Bifrost's own footprint, since
+ * it shares the cgroup with the jobs it spawns.
+ *
+ * The floor differs by basis on purpose. Against the box it is 2, so an
+ * unreadable /proc/meminfo still makes progress. Against a real cgroup ceiling
+ * it is 1: a ceiling too small for two jobs must yield one, because forcing a
+ * second is precisely the overcommit this exists to prevent.
+ */
+export function deriveMaxInFlight(
+  cfg: BifrostConfig,
+  totalMb: number,
+  cgroupMaxMb: number | null = null,
+): number {
+  const { perJobMb, ramShare, memReservePct, maxInFlightCap } = cfg.summarize;
+  if (cgroupMaxMb && cgroupMaxMb > 0) {
+    const budget = cgroupMaxMb * (1 - memReservePct);
+    const derived = Math.floor(budget / perJobMb);
+    return Math.max(1, Math.min(maxInFlightCap, derived));
+  }
   if (!totalMb) return 2;
-  const derived = Math.floor(
-    (totalMb * cfg.summarize.ramShare) / cfg.summarize.perJobMb,
-  );
-  return Math.max(2, Math.min(cfg.summarize.maxInFlightCap, derived));
+  const derived = Math.floor((totalMb * ramShare) / perJobMb);
+  return Math.max(2, Math.min(maxInFlightCap, derived));
 }
 
 /** Live view of the queue, for the snapshot. */
@@ -273,17 +330,36 @@ export function summarizeState(): { active: string[]; queued: string[] } {
   return { active: [...inFlight.keys()], queued: [...order] };
 }
 
-/** Derived limits for the current box — for the startup log. */
+/**
+ * Derived limits — for the startup log.
+ *
+ * There are TWO guards and they answer different questions, so the log reports
+ * both rather than blending them:
+ *
+ *  - `maxInFlight` — how many jobs fit in the cgroup this service runs in.
+ *    `basis` says whether that ceiling or the box's RAM decided it.
+ *  - `reserveMb` — the free-memory floor `pump` holds the queue at. That gate
+ *    is about the whole box being under pressure, not about the cgroup, so it
+ *    is computed from system MemTotal. An earlier version of this function
+ *    reported it against the cgroup ceiling, which made the logged number
+ *    describe nothing that was actually enforced.
+ */
 export function summarizeLimits(cfg: BifrostConfig): {
   maxInFlight: number;
   totalMb: number;
   reserveMb: number;
+  basis: "cgroup" | "system";
+  cgroupMaxMb: number | null;
 } {
   const { totalMb } = memInfo();
+  const cgroupMaxMb = readOwnCgroupMaxMb();
   return {
-    maxInFlight: deriveMaxInFlight(cfg, totalMb),
+    maxInFlight: deriveMaxInFlight(cfg, totalMb, cgroupMaxMb),
     totalMb,
+    // Matches the `availMb < totalMb * memReservePct` check in pump() exactly.
     reserveMb: Math.round(totalMb * cfg.summarize.memReservePct),
+    basis: cgroupMaxMb ? "cgroup" : "system",
+    cgroupMaxMb,
   };
 }
 
@@ -294,8 +370,12 @@ function pump(cfg: BifrostConfig) {
   }
   while (order.length > 0) {
     const { totalMb, availMb } = memInfoImpl();
-    if (inFlight.size >= deriveMaxInFlight(cfg, totalMb)) break;
+    if (inFlight.size >= deriveMaxInFlight(cfg, totalMb, cgroupCeilingMb)) break;
     // Hold the whole queue when free RAM dips below the reserve; retry shortly.
+    // Deliberately system-wide, not cgroup-scoped: concurrency above already
+    // bounds what fits in our own cgroup, whereas this is the "the box itself is
+    // struggling, don't add to it" backstop. summarizeLimits reports this same
+    // number so the startup log states what is actually enforced.
     if (availMb < totalMb * cfg.summarize.memReservePct) {
       pumpTimer = setTimeout(() => pump(cfg), 2500);
       return;

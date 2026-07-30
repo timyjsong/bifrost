@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -10,6 +9,7 @@ import {
   readTranscriptCwd,
 } from "./confirm";
 import { sessionName } from "./spawn";
+import { tempDir } from "../testing/tmp";
 
 // ── Throwaway-tmux harness (never real claude; panes run `sleep`). ─────────────
 async function tmuxOut(args: string[]): Promise<{ code: number; out: string }> {
@@ -30,7 +30,7 @@ const d = (await hasTmux()) ? describe : describe.skip;
 // ── readTranscriptCwd (still used by the resume route's read-back) ─────────────
 describe("readTranscriptCwd", () => {
   test("pulls the top-level cwd from the transcript head", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "bifrost-confirm-"));
+    const dir = tempDir("bifrost-confirm-");
     const path = join(dir, "t.jsonl");
     writeFileSync(
       path,

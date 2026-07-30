@@ -22,12 +22,26 @@ const CLAUDE_RE = /(^|\/| )(claude|ccd-cli)(\s|$|\/)/;
 // pid -> last cumulative cpu-jiffies sample, for instantaneous CPU
 const procCpu = new Map<number, { jiffies: number; at: number }>();
 
+/**
+ * Pure: utime+stime out of a /proc/<pid>/stat line.
+ *
+ * The comm field is wrapped in parens and may itself contain spaces AND parens
+ * (a process can name itself anything), so the fields after it are found from
+ * the LAST closing paren, never by splitting the line on spaces.
+ */
+export function parseJiffies(statLine: string): number | undefined {
+  const close = statLine.lastIndexOf(")");
+  if (close < 0) return undefined;
+  const after = statLine.slice(close + 2).trimStart().split(/\s+/);
+  const utime = Number(after[11]);
+  const stime = Number(after[12]);
+  if (!Number.isFinite(utime) || !Number.isFinite(stime)) return undefined;
+  return utime + stime;
+}
+
 function readJiffies(pid: number): number | undefined {
   try {
-    const statLine = readFileSync(`/proc/${pid}/stat`, "utf8");
-    // comm (field 2) may contain spaces — parse after the closing paren.
-    const after = statLine.slice(statLine.lastIndexOf(")") + 2).trimStart().split(" ");
-    return Number(after[11]) + Number(after[12]); // utime + stime
+    return parseJiffies(readFileSync(`/proc/${pid}/stat`, "utf8"));
   } catch {
     return undefined;
   }
@@ -161,9 +175,8 @@ async function collectTmuxPanes(): Promise<TmuxPane[]> {
   return parseTmuxPanes(out);
 }
 
-async function collectPorts(): Promise<PortInfo[]> {
-  const out = await run(["ss", "-tlnpH"]);
-  if (!out) return [];
+/** Pure: parse `ss -tlnpH` output into listening-port rows. */
+export function parsePorts(out: string): PortInfo[] {
   const ports: PortInfo[] = [];
   const seen = new Set<string>();
   for (const line of out.split("\n")) {
@@ -184,20 +197,46 @@ async function collectPorts(): Promise<PortInfo[]> {
   return ports.sort((a, b) => a.port - b.port);
 }
 
+async function collectPorts(): Promise<PortInfo[]> {
+  const out = await run(["ss", "-tlnpH"]);
+  return out ? parsePorts(out) : [];
+}
+
 // previous /proc/stat sample, for real CPU utilization between ticks
 let prevCpu: { busy: number; total: number } | null = null;
 
-function readCpuPct(statRaw: string): number | undefined {
+export interface CpuSample {
+  busy: number;
+  total: number;
+}
+
+/** Pure: the busy/total jiffy totals on the `cpu` line of /proc/stat. */
+export function parseCpuSample(statRaw: string): CpuSample {
   const f = statRaw.split("\n")[0].trim().split(/\s+/).slice(1).map(Number);
-  const idle = f[3] + (f[4] ?? 0); // idle + iowait
+  const idle = (f[3] || 0) + (f[4] ?? 0); // idle + iowait
   const total = f.reduce((a, b) => a + (b || 0), 0);
-  const busy = total - idle;
-  let pct: number | undefined;
-  if (prevCpu && total > prevCpu.total) {
-    pct = ((busy - prevCpu.busy) / (total - prevCpu.total)) * 100;
-  }
-  prevCpu = { busy, total };
-  return pct === undefined ? undefined : Math.max(0, Math.min(100, pct));
+  return { busy: total - idle, total };
+}
+
+/**
+ * Pure: utilisation between two samples, as a percentage.
+ *
+ * Undefined without a previous sample (the first tick has nothing to compare
+ * against) or if the counters did not advance. Clamped, because /proc counters
+ * can appear to go backwards across a suspend or a CPU hotplug and a negative
+ * or >100 reading would render as a broken gauge.
+ */
+export function cpuPctBetween(prev: CpuSample | null, cur: CpuSample): number | undefined {
+  if (!prev || cur.total <= prev.total) return undefined;
+  const pct = ((cur.busy - prev.busy) / (cur.total - prev.total)) * 100;
+  return Math.max(0, Math.min(100, pct));
+}
+
+function readCpuPct(statRaw: string): number | undefined {
+  const cur = parseCpuSample(statRaw);
+  const pct = cpuPctBetween(prevCpu, cur);
+  prevCpu = cur;
+  return pct;
 }
 
 function diskInfo(): { totalKb: number; freeKb: number } {

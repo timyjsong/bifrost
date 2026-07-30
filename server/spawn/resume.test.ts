@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -16,6 +15,7 @@ import {
 } from "./resume";
 import { buildResumeArgv, sessionName, CLAUDE_BIN } from "./spawn";
 import type { SpawnResult } from "./confirm";
+import { tempDir } from "../testing/tmp";
 
 const UUID = "aaaabbbb-1111-2222-3333-444455556666";
 const NOW = 1_000_000_000_000; // frozen clock; tests never read wall time
@@ -61,7 +61,7 @@ describe("AC6.4 buildResumeArgv launch shape", () => {
     expect(argv[binIdx + 1]).toBe("--resume");
   });
 
-  test("AC6.5 — an OUT-OF-REALM cwd builds fine (no /home/you confine on resume)", () => {
+  test("AC6.5 — an OUT-OF-REALM cwd builds fine (no home-root confine on resume)", () => {
     // resume is allowed for any directory; the builder takes the cwd as-is.
     for (const cwd of ["/tmp/scratch", "/home/you", "/var/lib/x", "/home/you/.cache/bg"]) {
       const argv = buildResumeArgv({ uuid: UUID, cwd });
@@ -112,7 +112,7 @@ describe("AC6.1 pidMatchesStart (procStart pid-reuse guard)", () => {
 // ── AC6.1 — probeLiveByUuid: FRESH read of sessions dir, never the snapshot ─────
 describe("AC6.1 probeLiveByUuid (fresh sessions-dir + /proc probe)", () => {
   function sessionsDir(): string {
-    const root = mkdtempSync(join(tmpdir(), "bifrost-resume-"));
+    const root = tempDir("bifrost-resume-");
     const dir = join(root, "sessions");
     mkdirSync(dir, { recursive: true });
     return dir;
@@ -471,7 +471,7 @@ td("AC6.2/AC6.5 throwaway-tmux resume launch", () => {
   });
 
   function fakeProjects(): { root: string; projectsDir: string } {
-    const root = mkdtempSync(join(tmpdir(), "bifrost-resume-tmux-"));
+    const root = tempDir("bifrost-resume-tmux-");
     return { root, projectsDir: join(root, "projects") };
   }
   function writeTranscript(projectsDir: string, uuid: string, cwd: string): void {
@@ -492,7 +492,7 @@ td("AC6.2/AC6.5 throwaway-tmux resume launch", () => {
     killed.push(name);
     const { projectsDir } = fakeProjects();
     // out-of-realm cwd: /tmp (a real, existing dir — resume confines nothing)
-    const cwd = mkdtempSync(join(tmpdir(), "bifrost-oor-"));
+    const cwd = tempDir("bifrost-oor-");
     writeTranscript(projectsDir, uuid, cwd);
 
     const lock = new PerUuidLock();

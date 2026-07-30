@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, userSlicePath } from "./config";
+import { tempDir } from "./testing/tmp";
 
 const BASE = {
   bind: { host: "127.0.0.1", port: 1 },
@@ -28,7 +29,7 @@ const BASE = {
 };
 
 function withConfig(overrides: Record<string, unknown>): ReturnType<typeof loadConfig> {
-  const dir = mkdtempSync(join(tmpdir(), "bifrost-cfg-"));
+  const dir = tempDir("bifrost-cfg-");
   const path = join(dir, "config.json");
   writeFileSync(path, JSON.stringify({ ...BASE, ...overrides }));
   process.env.BIFROST_CONFIG = path;

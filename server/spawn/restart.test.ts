@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -14,6 +13,7 @@ import {
 } from "./restart";
 import { sessionName } from "./spawn";
 import type { SpawnResult } from "./confirm";
+import { tempDir } from "../testing/tmp";
 
 const UUID = "aaaabbbb-1111-2222-3333-444455556666";
 const NOW = 1_000_000_000_000; // frozen clock; tests never read wall time
@@ -336,7 +336,7 @@ describe("restart orchestration (restartSession)", () => {
 // ── AC7.3 — fresh-restart leaves the OLD transcript untouched (on disk) ──────────
 describe("AC7.3 fresh-restart does NOT delete the old transcript", () => {
   test("after a fresh-restart the old <uuid>.jsonl is byte-identical (the orchestration never touches it)", async () => {
-    const root = mkdtempSync(join(tmpdir(), "bifrost-restart-"));
+    const root = tempDir("bifrost-restart-");
     const projectsDir = join(root, "projects");
     const slug = "/home/you/proj".replace(/[/.]/g, "-");
     const dir = join(projectsDir, slug);
