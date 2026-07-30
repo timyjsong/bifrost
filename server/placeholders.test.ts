@@ -239,7 +239,26 @@ describe("shape: no real machine identifiers", () => {
       for (const chunk of ["tEXt", "iTXt", "zTXt", "eXIf", "Comment"]) {
         if (ascii.includes(chunk)) offenders.push(`${f}  (${chunk} chunk)`);
       }
-      for (const m of ascii.matchAll(/\/home\/[A-Za-z0-9._-]+/g)) offenders.push(`${f}  ${m[0]}`);
+      // The full battery over printable strings, not just one pattern: an
+      // extension filter is a hiding place, so what it hides gets read directly.
+      const checks: [RegExp, (v: string) => boolean][] = [
+        [HOME_PATH, (v) => v.toLowerCase() === PLACEHOLDER.home],
+        [HOME_SLUG, (v) => v.toLowerCase() === PLACEHOLDER.homeSlug],
+        [TAILNET, (v) => v.includes(PLACEHOLDER.tailnet)],
+        [CGNAT, (v) => v === PLACEHOLDER.cgnat],
+        [EMAIL, (v) => v.endsWith(PLACEHOLDER.emailDomain)],
+        [UUID, (v) => FIXTURE_UUIDS.has(v.toLowerCase())],
+        [OPAQUE_ID, () => false],
+      ];
+      for (const [pat, ok] of checks) {
+        for (const m of ascii.matchAll(pat)) if (!ok(m[0])) offenders.push(`${f}  ${m[0]}`);
+      }
+      if (realNames.length) {
+        for (const tok of ascii.match(WORD_TOKEN) ?? []) {
+          const name = matchesRealName(tok);
+          if (name) offenders.push(`${f}  ${tok} (real directory: ${name})`);
+        }
+      }
     }
     expect(offenders).toEqual([]);
   });
@@ -316,6 +335,22 @@ describe("allowlist: fixtures use declared values only", () => {
     const lines = code.split("\n").map((l) => l.trim()).filter(Boolean);
     const bad = lines.filter((l) => !/^export const [A-Z_0-9]+ = \/.*\/[gimsuy]*;$/.test(l));
     expect(bad).toEqual([]);
+  });
+
+  // A regex body is a fine place to hide a name: it satisfies the grammar above
+  // exactly. Legitimate patterns DO contain path and host fragments, so this
+  // checks bodies for real directory names only — the one thing no pattern here
+  // has any reason to spell.
+  test("the unscanned module's regex bodies name no real directory", async () => {
+    if (!realNames.length) return skipNotice();
+    const raw = await read(PATTERNS_MODULE);
+    const bodies = [...raw.matchAll(/= \/(.*)\/[gimsuy]*;/g)].map((m) => m[1]).join("\n");
+    const offenders: string[] = [];
+    for (const tok of bodies.match(WORD_TOKEN) ?? []) {
+      const name = matchesRealName(tok);
+      if (name) offenders.push(`${tok} (real directory: ${name})`);
+    }
+    expect(offenders).toEqual([]);
   });
 
   // Stripping comments to check the grammar leaves comments unchecked, which is
