@@ -12,6 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The placeholder guard scans published HISTORY, not just the tree —
+          # a shallow clone would hand it one commit and report a pass.
+          fetch-depth: 0
 
       # Pinned rather than `latest`: the suite is verified against this Bun, and a
       # toolchain that moves on its own turns a green history into a false signal.

@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readdirSync } from "node:fs";
 import {
+  ACKNOWLEDGED,
   COMMON_WORDS,
   DEMO_PROJECTS,
   FIXTURE_UUIDS,
@@ -40,6 +41,7 @@ import {
   HOME_PATH,
   HOME_ROOTED,
   HOME_SLUG,
+  OPAQUE_ID,
   ROOTED_PATH,
   TAILNET,
   UUID,
@@ -79,13 +81,53 @@ async function allTrackedFiles(): Promise<string[]> {
 
 /** Every commit message in the repo — the channel a tree scan cannot see. */
 async function allCommitMessages(): Promise<string> {
-  const proc = Bun.spawn(["git", "-C", repoRoot, "log", "--all", "--format=%B%n%an%n%ae"], {
-    stdout: "pipe",
-    stderr: "ignore",
-  });
+  const proc = Bun.spawn(
+    ["git", "-C", repoRoot, "log", "--all", "--format=%B%n%an%n%ae%n%cn%n%ce"],
+    { stdout: "pipe", stderr: "ignore" },
+  );
   const out = await new Response(proc.stdout).text();
   await proc.exited;
   return out;
+}
+
+/**
+ * Every blob and every path ever committed.
+ *
+ * The index is the wrong artifact. Scanning `git ls-files` means a value removed
+ * at HEAD reads as gone while every historical commit still carries it — which
+ * is exactly the state this guard kept certifying as clean, three times.
+ * Published history is what a reader clones, so published history is what gets
+ * scanned. Paths are included because a directory can name a real project even
+ * when every file under it is innocent.
+ */
+async function historyText(): Promise<string> {
+  const list = Bun.spawn(["git", "-C", repoRoot, "rev-list", "--all", "--objects"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const listing = await new Response(list.stdout).text();
+  await list.exited;
+
+  const blobs: string[] = [];
+  const paths: string[] = [];
+  for (const line of listing.split("\n")) {
+    const [sha, ...rest] = line.split(" ");
+    if (!sha) continue;
+    const path = rest.join(" ");
+    if (path) paths.push(path);
+    if (path && !BINARY_EXT.test(path)) blobs.push(sha);
+  }
+
+  const proc = Bun.spawn(["git", "-C", repoRoot, "cat-file", "--batch"], {
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  proc.stdin.write(blobs.join("\n") + "\n");
+  proc.stdin.end();
+  const dumped = await new Response(proc.stdout).text();
+  await proc.exited;
+  return dumped + "\n" + paths.join("\n");
 }
 
 const files = await trackedTextFiles();
@@ -157,6 +199,15 @@ function matchesRealName(token: string): string | null {
 }
 
 function skipNotice(): void {
+  // On CI this is a FAILURE, not a skip: the badge must not attest to a check
+  // that did not execute. Locally it stays a warning, because a contributor's
+  // machine legitimately has none of these directories.
+  if (process.env.CI) {
+    throw new Error(
+      "placeholders: the reality checks cannot run here (no developer project " +
+        "roots), and CI must not report a pass for a check that did not run.",
+    );
+  }
   console.warn(
     "[placeholders] reality checks SKIPPED: no developer project roots on this host. " +
       "The shape and allowlist checks still ran and carry the guarantee here; these two " +
@@ -361,6 +412,21 @@ describe("reality: fixtures do not name anything on this machine", () => {
     expect([...DEMO_PROJECTS].filter((d) => realNames.includes(d))).toEqual([]);
   });
 
+  // The third allowlist, and the one that can silently switch the reality check
+  // OFF for a name. An entry that shadows a real directory has to be declared,
+  // and a declared collision has to be an ordinary word — no hyphens, no coined
+  // names — so a distinctive project name cannot be laundered through it.
+  test("every stoplist word that shadows a real directory is acknowledged", () => {
+    const localRaw = localProjectNames().map((n) => n.toLowerCase());
+    const shadowing = [...COMMON_WORDS].filter((w) => localRaw.includes(w));
+    expect(shadowing.filter((w) => !ACKNOWLEDGED.has(w))).toEqual([]);
+  });
+
+  test("an acknowledged collision is an ordinary word, not a distinctive name", () => {
+    const bad = [...ACKNOWLEDGED].filter((w) => !/^[a-z]{4,10}$/.test(w));
+    expect(bad).toEqual([]);
+  });
+
   // The channel the tree scan structurally cannot see — and the one a real leak
   // actually used: a commit message naming a client project.
   test("no commit message or author field names a real directory", async () => {
@@ -374,6 +440,41 @@ describe("reality: fixtures do not name anything on this machine", () => {
       }
     });
     expect([...new Set(offenders)]).toEqual([]);
+  });
+
+  // The structural fix. Every check above reads the working tree; these read
+  // what is actually published.
+  test("no blob or path in published HISTORY carries a machine identifier", async () => {
+    const text = await historyText();
+    const offenders: string[] = [];
+    const checks: [RegExp, (v: string) => boolean][] = [
+      [HOME_PATH, (v) => v.toLowerCase() === PLACEHOLDER.home],
+      [HOME_SLUG, (v) => v.toLowerCase() === PLACEHOLDER.homeSlug],
+      [TAILNET, (v) => v.includes(PLACEHOLDER.tailnet)],
+      [CGNAT, (v) => v === PLACEHOLDER.cgnat],
+      [UUID, (v) => FIXTURE_UUIDS.has(v.toLowerCase())],
+      [OPAQUE_ID, () => false],
+    ];
+    for (const [pat, ok] of checks) {
+      for (const m of text.matchAll(pat)) if (!ok(m[0])) offenders.push(m[0]);
+    }
+    expect([...new Set(offenders)].sort()).toEqual([]);
+  });
+
+  test("no blob or path in published HISTORY names a real directory", async () => {
+    if (!realNames.length) return skipNotice();
+    const text = await historyText();
+    const offenders = new Set<string>();
+    for (const tok of text.match(WORD_TOKEN) ?? []) {
+      const name = matchesRealName(tok);
+      if (name) offenders.add(`${tok} (real directory: ${name})`);
+    }
+    expect([...offenders]).toEqual([]);
+  });
+
+  test("no commit message carries an opaque account-scoped id", async () => {
+    const text = await allCommitMessages();
+    expect([...text.matchAll(OPAQUE_ID)].map((m) => m[0])).toEqual([]);
   });
 
   test("no commit message carries a machine identifier", async () => {

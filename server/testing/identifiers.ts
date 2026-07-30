@@ -53,10 +53,20 @@ export function projectSegment(path: string): string | null {
 export const COMMON_WORDS = new Set([
   "mobile", "desktop", "server", "client", "shared", "common", "public",
   "private", "static", "assets", "images", "scripts", "styles", "config",
-  "notes", "drafts", "backup", "temp", "tools", "utils", "vendor",
+  "backup", "temp", "tools", "utils", "vendor",
   "docs", "data", "test", "tests", "build", "dist", "sandbox", "scratch",
-  
 ]);
+
+/**
+ * Ordinary words that are ALSO real directories on the developer's machine.
+ *
+ * Declaring one suppresses the reality check for that name, so each entry is a
+ * deliberate judgement that the word is too generic to disclose anything. The
+ * list is short by design and a reviewer should push back on additions: a
+ * distinctive name — hyphenated, or a coined word — does not belong here, and
+ * `placeholders.test.ts` enforces that shape.
+ */
+export const ACKNOWLEDGED = new Set(["mobile"]);
 
 /** Path segments that hold projects rather than being one. */
 export const CONTAINERS = new Set(["projects", "code", "work", "src", "tmp", "data"]);
