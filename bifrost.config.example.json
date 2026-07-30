@@ -24,7 +24,7 @@
     "perJobMb": 250,
     "ramShare": 0.33,
     "memReservePct": 0.15,
-    "maxInFlightCap": 12,
+    "maxInFlightCap": 4,
     "maxQueue": 40,
     "timeoutMs": 120000
   },

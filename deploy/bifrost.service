@@ -14,7 +14,17 @@ WorkingDirectory=/home/you/bifrost
 ExecStart=/home/you/.bun/bin/bun server/index.ts
 Restart=always
 RestartSec=5
-MemoryMax=300M
+# This cap covers Bifrost AND anything it spawns as a direct child — which means
+# the summarize jobs, since those are plain child processes and do not escape the
+# service's cgroup. (Sessions you start from the dashboard are different: they
+# launch inside tmux, so they belong to the tmux server, not to this unit.)
+#
+# So size it as: Bifrost itself (~150M) + summarize.maxInFlightCap ×
+# summarize.perJobMb from your config. The shipped defaults are 4 × 250M, hence
+# 2G with room to spare. If you raise either of those knobs, raise this too — set
+# it too low and a summarize job gets OOM-killed inside the cgroup, and the
+# kernel may pick Bifrost as the victim rather than the job.
+MemoryMax=2G
 
 [Install]
 WantedBy=multi-user.target

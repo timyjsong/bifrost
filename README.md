@@ -123,6 +123,8 @@ sudo systemctl status bifrost
 
 Server code changes need a service restart. Frontend changes only need `cd web && bun run build` — the running server picks up the new bundle.
 
+One knob is easy to get wrong, so it's worth stating: the unit's `MemoryMax` has to cover Bifrost *and* its summarize jobs, because those run as direct child processes and stay inside the service's cgroup. Sessions you start from the dashboard don't count against it — they launch inside tmux and belong to the tmux server instead. Size it as Bifrost (~150 MB) plus `summarize.maxInFlightCap × summarize.perJobMb`; the shipped defaults are 4 × 250 MB against a 2 GB cap. Raise either knob and raise the cap with it, or a summarize job will be OOM-killed inside the cgroup — and the kernel may pick Bifrost as the victim instead of the job.
+
 ## How it was built
 
 I specced each build before it was written, agreed the acceptance criteria up front, then let the implementation run autonomously in Claude Code sessions and reviewed the result until it converged. Every cycle ships contract tests for the logic it added. The specs are in [`phases/`](phases/), including what was considered and rejected.
