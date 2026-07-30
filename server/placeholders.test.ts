@@ -78,6 +78,17 @@ async function allTrackedFiles(): Promise<string[]> {
 }
 
 /** Every commit message in the repo — the channel a tree scan cannot see. */
+/** The declared author identity, which is published on purpose. */
+async function gitAuthorName(): Promise<string> {
+  const proc = Bun.spawn(["git", "-C", repoRoot, "log", "-1", "--format=%an"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out || "";
+}
+
 async function allCommitMessages(): Promise<string> {
   const proc = Bun.spawn(
     ["git", "-C", repoRoot, "log", "--all", "--format=%B%n%an%n%ae%n%cn%n%ce"],
@@ -541,7 +552,15 @@ describe("reality: fixtures do not name anything on this machine", () => {
   // clean. Read from the machine the same way directories are.
   test("no blob, path or message carries the bare OS username", async () => {
     if (!realUser || realUser.length < 3) return skipNotice();
-    const corpus = (await historyText()) + "\n" + (await allCommitMessages());
+    // The AUTHOR'S NAME is deliberately published — it is the copyright holder
+    // in LICENSE and the author of every commit. What must not be published is
+    // the OS USERNAME as a system identifier: in paths, configs, and process
+    // listings. Those happen to share a prefix here, so the declared full name
+    // is removed before scanning rather than the check being weakened.
+    const authorName = (await gitAuthorName()).trim();
+    const corpus = ((await historyText()) + "\n" + (await allCommitMessages()))
+      .split(authorName)
+      .join(" ");
     const offenders = new Set<string>();
     for (const tok of corpus.match(WORD_TOKEN) ?? []) {
       const lower = tok.toLowerCase();
