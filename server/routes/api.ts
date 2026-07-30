@@ -3,9 +3,9 @@
  *
  * Not the WHOLE surface: `/api/push/*` and `/api/alerts/*` are a prefix-matched
  * sub-router in `alerts/manager.ts`, reached before this table and free to
- * decline a request inside its own namespace. Thirty of the thirty-eight
- * endpoints are here; those eight are not, and `surface.test.ts` therefore says
- * nothing about them.
+ * decline a request inside its own namespace. This table holds thirty route entries;
+ * seven further paths live there, and `surface.test.ts` therefore says nothing
+ * about them.
  *
  * Deliberately free of imports from the server: this module boots nothing, so
  * the surface can be asserted in a test without standing up Bun.serve, the
