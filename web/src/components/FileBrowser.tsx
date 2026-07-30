@@ -3,6 +3,7 @@ import type { FileEntry, ProjectInfo } from "../../../shared/types";
 import { fetchDir } from "../lib/files";
 import { fmtBytes, relTime } from "../lib/format";
 import { Chip, Panel } from "./ui";
+import { OriginateDialog } from "./OriginateDialog";
 
 const REASON: Record<string, string> = {
   "outside-root": "Outside the project — blocked",
@@ -92,10 +93,14 @@ export function FileBrowser({
   project,
   now,
   onClose,
+  onOpenDrive,
 }: {
   project: ProjectInfo;
   now: number;
   onClose: () => void;
+  // Start a fresh session in the browsed folder (story 2-5). When the new session
+  // surfaces in the snapshot it routes into the drive view.
+  onOpenDrive?: (sessionId: string) => void;
 }) {
   const root = project.path;
   const [path, setPath] = useState(root);
@@ -103,6 +108,7 @@ export function FileBrowser({
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [originating, setOriginating] = useState(false);
 
   useEffect(() => {
     let stale = false;
@@ -137,7 +143,18 @@ export function FileBrowser({
   ];
 
   return (
-    <Panel className="flex h-full flex-col p-3">
+    <Panel className="relative flex h-full flex-col p-3">
+      {originating && (
+        <OriginateDialog
+          cwd={path}
+          projectName={project.name}
+          onClose={() => setOriginating(false)}
+          onStarted={(sessionId) => {
+            setOriginating(false);
+            onOpenDrive?.(sessionId);
+          }}
+        />
+      )}
       <div className="mb-2 flex items-center gap-2">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-0.5 text-[12px]">
           {/* root crumb: back out to the project grid */}
@@ -164,6 +181,13 @@ export function FileBrowser({
             </span>
           ))}
         </div>
+        <button
+          onClick={() => setOriginating(true)}
+          className="shrink-0 rounded-md border border-gold-dim/60 px-2 py-0.5 text-[11px] text-gold transition-colors hover:bg-gold-dim/10"
+          title="Start a Claude session in this folder"
+        >
+          start session
+        </button>
         <button
           onClick={() => setShowHidden((v) => !v)}
           className={`shrink-0 rounded-md border px-2 py-0.5 text-[11px] transition-colors ${

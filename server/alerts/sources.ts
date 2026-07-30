@@ -1,24 +1,43 @@
 /**
  * The extra reads the alert engine needs, beyond what the dashboard collector
- * already gathers. All world-readable; bifrost runs as the invoking user. Called once per
- * fast tick (no second polling loop) alongside the existing collectors.
+ * already gathers. Every source is world-readable, so this runs with no more
+ * privilege than the dashboard. Called once per fast tick (no second polling
+ * loop) alongside the existing collectors.
  *
- * Unit names are pinned to what actually exists on this box (verified): the ssh
- * unit is `ssh` (not `sshd`), there is no postgres, and `bifrost` is omitted —
- * a dead bifrost can't send its own down-alert. claude-limits health keys off the
- * *timer* + the live memory.max, since the .service is a oneshot that idles.
+ * Which units get watched is configuration, not code: `alerts.watchedUnits` and
+ * `alerts.limitsUnit` arrive from bifrost.config.json at boot, and both default
+ * to empty — an unconfigured install watches nothing rather than alerting on
+ * services it invented. Two notes worth carrying:
+ *   - Don't list bifrost's own unit. A dead bifrost cannot send its own
+ *     down-alert, so watching itself buys a silent failure.
+ *   - `limitsUnit` health keys off the *timer* plus the live memory.max, because
+ *     a rearm unit of this shape is typically a oneshot that idles between runs
+ *     — an inactive .service is normal and would otherwise read as down.
  */
 import { readFile } from "node:fs/promises";
+import { userSlicePath } from "../config";
 
-const SLICE = "/sys/fs/cgroup/user.slice/user-1000.slice";
+const SLICE = userSlicePath();
 
-/** Critical units whose disappearance is worth a push. tailscaled/ssh = access risk. */
-export const WATCHED_UNITS = ["ssh", "tailscaled", "caddy", "mcp-fs-proxy"];
+/** Units whose down-state fires service_down + the limits health pair — set
+ *  from cfg.alerts at boot. Neutral until configured: nothing watched. */
+let watchedUnits: string[] = [];
+let limitsUnit: string | null = null;
+
+export function configureAlertSources(opts: {
+  watchedUnits: string[];
+  limitsUnit: string | null;
+}): void {
+  watchedUnits = opts.watchedUnits;
+  limitsUnit = opts.limitsUnit;
+}
 
 export interface AlertSources {
   oomKill: number; // cgroup memory.events oom_kill (monotonic)
   ramWall: number; // cgroup memory.events 'max' — allocations refused (monotonic)
   swapPct: number; // slice swap.current / swap.max, 0..100
+  swapCurrentKb: number;
+  sliceMaxKb: number | null; // slice memory.max cap; null = unbounded
   psiMemSome: number; // /proc/pressure/memory  some avg10
   servicesDown: string[]; // watched units currently failed/inactive
   limitsHealthy: boolean; // the safeguard itself
@@ -80,7 +99,11 @@ export async function collectAlertSources(): Promise<AlertSources> {
     readNum(`${SLICE}/memory.swap.max`),
     readNum(`${SLICE}/memory.max`),
     psiSome("/proc/pressure/memory"),
-    systemctlActive([...WATCHED_UNITS, "claude-limits.service", "claude-limits.timer"]),
+    systemctlActive(
+      limitsUnit
+        ? [...watchedUnits, `${limitsUnit}.service`, `${limitsUnit}.timer`]
+        : [...watchedUnits],
+    ),
   ]);
 
   const swapPct =
@@ -91,27 +114,32 @@ export async function collectAlertSources(): Promise<AlertSources> {
   // "down" = failed or inactive only; treat unknown/activating as up so a
   // systemctl hiccup or a oneshot mid-start never storms.
   const isDown = (s: string | undefined) => s === "failed" || s === "inactive";
-  const servicesDown = WATCHED_UNITS.filter((_, i) => isDown(states[i]));
+  const servicesDown = watchedUnits.filter((_, i) => isDown(states[i]));
 
-  const svcState = states[WATCHED_UNITS.length];
-  const timerState = states[WATCHED_UNITS.length + 1];
+  // The limits pair is optional (box-specific tooling): unconfigured → healthy.
   let limitsHealthy = true;
   let limitsReason: string | undefined;
-  if (svcState === "failed") {
-    limitsHealthy = false;
-    limitsReason = "claude-limits.service failed";
-  } else if (timerState !== "active") {
-    limitsHealthy = false;
-    limitsReason = `claude-limits.timer ${timerState ?? "unknown"}`;
-  } else if (memMax === null) {
-    limitsHealthy = false;
-    limitsReason = "slice memory.max reverted to unbounded";
+  if (limitsUnit) {
+    const svcState = states[watchedUnits.length];
+    const timerState = states[watchedUnits.length + 1];
+    if (svcState === "failed") {
+      limitsHealthy = false;
+      limitsReason = `${limitsUnit}.service failed`;
+    } else if (timerState !== "active") {
+      limitsHealthy = false;
+      limitsReason = `${limitsUnit}.timer ${timerState ?? "unknown"}`;
+    } else if (memMax === null) {
+      limitsHealthy = false;
+      limitsReason = "slice memory.max reverted to unbounded";
+    }
   }
 
   return {
     oomKill: events.get("oom_kill") ?? 0,
     ramWall: events.get("max") ?? 0,
     swapPct,
+    swapCurrentKb: swapCur !== null ? Math.round(swapCur / 1024) : 0,
+    sliceMaxKb: memMax !== null ? Math.round(memMax / 1024) : null,
     psiMemSome: psiMem,
     servicesDown,
     limitsHealthy,

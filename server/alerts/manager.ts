@@ -5,10 +5,11 @@
  * handlers serve the subscribe flow and the policy editor.
  */
 import type { SessionInfo, SystemInfo } from "../../shared/types";
-import { type AlertPolicy, mergePolicy } from "../../shared/alerts";
+import { type AlertPolicy, type RecentAlert, mergePolicy } from "../../shared/alerts";
 import { evaluate, type EngineState } from "./engine";
 import { deriveReadings, emptyDeriveState, type DeriveState } from "./readings";
-import { collectAlertSources } from "./sources";
+import { collectAlertSources, type AlertSources } from "./sources";
+import { pushRecent } from "./feed";
 import { loadVapid } from "./vapid";
 import {
   addSubscription,
@@ -24,6 +25,12 @@ const POLICY_FILE = "alert-policy.json";
 let policy: AlertPolicy | null = null;
 let engineState: EngineState = {};
 let deriveState: DeriveState = emptyDeriveState();
+
+// Bounded, in-memory log of what fired — served at GET /api/alerts/recent so a
+// device that missed the push still has a record. Ephemeral (lost on restart),
+// like the push itself.
+const RECENT_CAP = 50;
+let recent: RecentAlert[] = [];
 
 async function getPolicy(): Promise<AlertPolicy> {
   if (!policy) policy = mergePolicy(await readJson<AlertPolicy | null>(POLICY_FILE, null));
@@ -42,11 +49,14 @@ export async function evaluateAlerts(
   system: SystemInfo,
   sessions: SessionInfo[],
   now: number,
+  sources?: AlertSources,
 ): Promise<void> {
   const pol = await getPolicy();
-  const sources = await collectAlertSources();
+  // The fast tick collects sources once and shares them (also surfaced in the
+  // snapshot); fall back to a fresh collect so this stays robust standalone.
+  const src = sources ?? (await collectAlertSources());
   const { readings, next: nextDerive } = deriveReadings(
-    sources,
+    src,
     system,
     sessions,
     pol,
@@ -56,6 +66,22 @@ export async function evaluateAlerts(
   deriveState = nextDerive;
   const { fired, next } = evaluate(readings, pol, engineState, now);
   engineState = next;
+
+  if (fired.length) {
+    recent = pushRecent(
+      recent,
+      fired.map((a) => ({
+        id: a.id,
+        tier: a.tier,
+        severity: a.severity,
+        title: a.title,
+        body: a.body,
+        instance: a.instance,
+        firedAt: now,
+      })),
+      RECENT_CAP,
+    );
+  }
 
   for (const a of fired) {
     // Deep-link a session-scoped alert (e.g. session_approval) straight to its
@@ -110,6 +136,10 @@ export async function handleAlertRequest(req: Request, url: URL): Promise<Respon
       url: "/",
     });
     return Response.json({ ...r, subscriptions: await subscriptionCount() });
+  }
+
+  if (p === "/api/alerts/recent" && req.method === "GET") {
+    return Response.json({ alerts: recent });
   }
 
   if (p === "/api/alerts/policy" && req.method === "GET") {

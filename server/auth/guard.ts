@@ -41,6 +41,22 @@ export function isSecureRequest(
   return proto === "https" || (!!secureHost && host === secureHost);
 }
 
+/**
+ * The Host that designates an HTTPS arrival, derived from the configured enroll
+ * URL. Only an `https:` URL qualifies: a misconfigured `http://` enrollUrl would
+ * otherwise make its own Host the HSTS trigger, and we would advertise strict
+ * transport on a plaintext response — a promise that route cannot keep.
+ * Unparseable or non-HTTPS → "" ("can't tell", never treated as secure).
+ */
+export function secureHostFrom(enrollUrl: string): string {
+  try {
+    const u = new URL(enrollUrl);
+    return u.protocol === "https:" ? u.host : "";
+  } catch {
+    return "";
+  }
+}
+
 // The ONE /api endpoint reachable without a token (besides health, handled
 // first). Enrollment must be pre-auth — it's how the first device gets a token —
 // but it still passes the Host/Origin allowlists below.

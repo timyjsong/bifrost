@@ -86,6 +86,7 @@ export function ProjectsPane({
   now,
   openPath,
   onOpenChange,
+  onOpenDrive,
 }: {
   projects: ProjectInfo[];
   now: number;
@@ -93,6 +94,8 @@ export function ProjectsPane({
   // grid ("back out to root"). null = show the grid.
   openPath: string | null;
   onOpenChange: (path: string | null) => void;
+  // Route a freshly-originated session into the drive view (story 2-5).
+  onOpenDrive?: (sessionId: string) => void;
 }) {
   const realms = [...new Set(projects.map((p) => p.realm))];
   const [filter, setFilter] = useState<string | null>(null);
@@ -110,6 +113,7 @@ export function ProjectsPane({
             project={open}
             now={now}
             onClose={() => onOpenChange(null)}
+            onOpenDrive={onOpenDrive}
           />
         </div>
       ) : (

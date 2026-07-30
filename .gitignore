@@ -4,6 +4,3 @@ bifrost.config.json
 *.log
 .env
 data/
-studio/
-__pycache__/
-*.pyc

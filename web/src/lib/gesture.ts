@@ -32,3 +32,20 @@ export function clampDrag(dx: number, width: number): number {
 export function shouldComplete(dx: number, width: number): boolean {
   return width > 0 && dx >= width * COMPLETE_FRACTION;
 }
+
+/**
+ * Auto-scroll should stick to the bottom on new content ONLY when the reader is
+ * already near the bottom — otherwise it steals scroll position from someone
+ * reading scrollback mid-turn (the big-transcript jank). Pure so the threshold
+ * is a tested contract.
+ */
+export const STICK_THRESHOLD_PX = 120;
+
+export function isNearBottom(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+  threshold = STICK_THRESHOLD_PX,
+): boolean {
+  return scrollHeight - (scrollTop + clientHeight) <= threshold;
+}

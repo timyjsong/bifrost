@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      "/api": "http://100.100.100.100:4444",
+      "/api": process.env.BIFROST_DEV_PROXY ?? "http://100.100.100.100:4444",
     },
   },
 });

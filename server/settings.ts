@@ -7,15 +7,21 @@
  * atomic JSON store under data/.
  */
 import { readJson, writeJsonAtomic } from "./alerts/store";
+import { SPAWN_MODELS, type SpawnModelAlias } from "../shared/types";
 
 const FILE = "settings.json";
 
 export interface Settings {
   /** Grace period (ms) before a submitted prompt is injected; 0 = send now. */
   sendDelayMs: number;
+  /** Model the originate picker preselects for NEW sessions. Bifrost's own
+   *  default — decoupled from the Claude account default, which Bifrost never
+   *  touches. */
+  defaultModel: SpawnModelAlias;
 }
 
-const DEFAULTS: Settings = { sendDelayMs: 3000 };
+const DEFAULTS: Settings = { sendDelayMs: 3000, defaultModel: "opus" };
+const MODEL_ALIASES: readonly string[] = SPAWN_MODELS.map((m) => m.alias);
 const MAX_DELAY_MS = 30_000;
 
 let cache: Settings | null = null;
@@ -28,7 +34,10 @@ export function clean(s: Partial<Settings> | null | undefined): Settings {
   const sendDelayMs = Number.isFinite(raw)
     ? Math.min(Math.max(0, Math.round(raw)), MAX_DELAY_MS)
     : DEFAULTS.sendDelayMs;
-  return { sendDelayMs };
+  const defaultModel = MODEL_ALIASES.includes(s?.defaultModel as string)
+    ? (s!.defaultModel as SpawnModelAlias)
+    : DEFAULTS.defaultModel;
+  return { sendDelayMs, defaultModel };
 }
 
 export async function getSettings(): Promise<Settings> {

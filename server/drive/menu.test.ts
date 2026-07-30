@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  modeFromPane,
   parsePermissionMenu,
   isValidAnswerKey,
   isPaneWorking,
   parsePermissionMode,
+  detectSignalDrift,
+  WORKING_DRIFT_IDLE_MS,
 } from "./menu";
 
 // Fixture mirrors the live Claude Code permission dialog (boxed, ❯ cursor).
@@ -127,9 +130,12 @@ describe("isPaneWorking", () => {
     expect(isPaneWorking(SOFT_IDLE_BG_PANE)).toBe(false);
   });
 
-  test("an elapsed timer alone (no 'esc to interrupt') is not the signal", () => {
-    // the old heuristic flickered on this; the bar marker is what counts now
-    expect(isPaneWorking("● thinking… (5s · ↑ 1.2k tokens)\n❯")).toBe(false);
+  test("an elapsed timer alone IS the signal (contract inverted 2026-07-02)", () => {
+    // The 06-17 contract keyed on "esc to interrupt" and rejected the timer as
+    // flickery. The current CC TUI DROPPED the literal (verified live across
+    // full turns), so the timer evidence is the primary signal now — capture
+    // flicker is absorbed by the pane route's server-side hold (workingHold).
+    expect(isPaneWorking("● thinking… (5s · ↑ 1.2k tokens)\n❯")).toBe(true);
   });
 
   test("a stray 'esc to interrupt' deep in scrollback doesn't count", () => {
@@ -161,3 +167,109 @@ describe("parsePermissionMode — read the mode off the pane (spike-verified str
   });
 });
 
+
+describe("detectSignalDrift — mode drift guard (working branch retired)", () => {
+  test("the mode-cycle hint with an unrecognizable mode flags mode drift", () => {
+    expect(detectSignalDrift("x\n⏵⏵ turbo mode on (shift+tab to cycle)")).toEqual(["mode"]);
+  });
+
+  test("a recognizable mode with the hint is not drift", () => {
+    expect(detectSignalDrift("x\n⏵⏵ accept edits on (shift+tab to cycle)")).toEqual([]);
+  });
+
+  test("an idle pane / turn evidence alone is never drift", () => {
+    expect(detectSignalDrift("transcript…\n> \n? for shortcuts")).toEqual([]);
+    expect(detectSignalDrift("x\n✶ Gallivanting… (2s · thinking)\n❯ ")).toEqual([]);
+  });
+});
+
+describe("isPaneWorking — re-derived signal, live-observed shapes (2026-07-02)", () => {
+  test("the thinking phase '(2s · thinking)' reads working (literal gone from current TUI)", () => {
+    expect(isPaneWorking("x\n✶ Gallivanting… (2s · thinking)\n❯ ")).toBe(true);
+  });
+
+  test("the token phase and stop-hooks phase read working", () => {
+    expect(isPaneWorking("x\n✻ Churning (16s · ↓ 1.5k tokens)\n❯ ")).toBe(true);
+    expect(isPaneWorking("x\n(Stop hooks… 1/3 · 16s · ↓ 1.5k tokens)\n❯ ")).toBe(true);
+  });
+
+  test("the old literal still reads working (older TUIs / attached panes)", () => {
+    expect(isPaneWorking("x\n✻ Churning (esc to interrupt)\n❯ ")).toBe(true);
+  });
+
+  test("an idle pane reads idle; scrollback timers beyond the window are ignored", () => {
+    expect(isPaneWorking("transcript…\n> \n? for shortcuts")).toBe(false);
+    const scrollback =
+      "old output (23s · ↓ 4.1k tokens)\n" + Array(12).fill("line").join("\n") + "\n> ";
+    expect(isPaneWorking(scrollback)).toBe(false);
+  });
+});
+
+describe("parsePermissionMenu — cursored colon-prompt menus (rewind confirm)", () => {
+  // Faithful to the live capture: FOUR context lines between prompt and options.
+  const REWIND_CONFIRM = [
+    "  Rewind",
+    "  Confirm you want to restore to the point before you sent this message:",
+    "  │ Say only TURN-TWO.",
+    "  │ (36s ago)",
+    "  The conversation will be forked.",
+    "  The code will be unchanged.",
+    "  ❯ 1. Restore conversation",
+    "    2. Summarize from here",
+    "    3. Summarize up to here",
+    "    4. Never mind",
+  ].join("\n");
+
+  test("the live-captured rewind confirm parses (colon prompt + cursored row)", () => {
+    const m = parsePermissionMenu(REWIND_CONFIRM);
+    expect(m).not.toBeNull();
+    expect(m!.options.length).toBe(4);
+    expect(m!.options[0].label).toContain("Restore conversation");
+  });
+
+  test("a colon-preceded numbered LIST without a cursor still rejects (M5 guard)", () => {
+    const list = [
+      "here are the options:",
+      "1. first thing",
+      "2. second thing",
+    ].join("\n");
+    expect(parsePermissionMenu(list)).toBeNull();
+  });
+});
+
+describe("detectSignalDrift — working-drift backstop (M2, mtime cross-check)", () => {
+  const workingPane = "x\n✻ Churning (16s · ↓ 1.5k tokens)\n❯ ";
+
+  test("timer present + transcript idle past the threshold → working drift", () => {
+    expect(detectSignalDrift(workingPane, WORKING_DRIFT_IDLE_MS + 1)).toEqual(["working"]);
+  });
+
+  test("timer present + transcript RECENTLY written → no drift (a live turn / long tool call)", () => {
+    expect(detectSignalDrift(workingPane, 5_000)).toEqual([]);
+    expect(detectSignalDrift(workingPane, WORKING_DRIFT_IDLE_MS - 1)).toEqual([]);
+  });
+
+  test("no transcriptIdleMs supplied → backstop inert (only mode drift possible)", () => {
+    expect(detectSignalDrift(workingPane)).toEqual([]);
+  });
+
+  test("idle transcript but NO timer → no working drift (genuinely idle session)", () => {
+    expect(detectSignalDrift("x\n❯ \n? for shortcuts", WORKING_DRIFT_IDLE_MS + 10_000)).toEqual([]);
+  });
+});
+
+describe("modeFromPane — the pane route's mode reading", () => {
+  test("a readable pane with NO mode string is the default mode (the current TUI renders nothing for it)", () => {
+    expect(modeFromPane("some transcript\n❯ \n  ← for agents")).toBe("auto");
+  });
+
+  test("explicit mode strings pass through", () => {
+    expect(modeFromPane("x\n⏸ plan mode on")).toBe("plan");
+    expect(modeFromPane("x\n⏵⏵ accept edits on")).toBe("accept-edits");
+  });
+
+  test("an EMPTY capture stays null — unknown, never a guessed mode", () => {
+    expect(modeFromPane("")).toBeNull();
+    expect(modeFromPane("   \n  ")).toBeNull();
+  });
+});

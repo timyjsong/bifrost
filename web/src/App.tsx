@@ -1,8 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { SessionInfo } from "../../shared/types";
 import { motion } from "motion/react";
 import { useNow, useSnapshot } from "./lib/useSnapshot";
 import { fmtKb, fmtUptime } from "./lib/format";
 import { pressureColor } from "./lib/pressure";
+import { staleLabel } from "./lib/staleness";
 import { Dot } from "./components/ui";
 import { SessionsPane } from "./components/SessionsPane";
 import { ProjectsPane } from "./components/ProjectsPane";
@@ -11,7 +13,10 @@ import { AlertsPane } from "./components/AlertsPane";
 import { SettingsPane } from "./components/SettingsPane";
 import { Enroll } from "./components/Enroll";
 import { DriveView } from "./components/DriveView";
+import { TranscriptView } from "./components/TranscriptView";
+import { ResumeablePane } from "./components/ResumeablePane";
 import { getToken, AUTH_LOST_EVENT } from "./lib/api";
+import { resolveDriveTarget, DRIVE_SETTLE_GRACE_MS } from "./lib/driveTarget";
 
 function scrollTop() {
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -32,10 +37,11 @@ function Rail({
 }) {
   const nav = [
     { id: "sessions", label: "Sessions", count: counts.sessions, alert: counts.needsYou },
+    { id: "resume", label: "Resume", count: undefined, alert: 0 },
     { id: "system", label: "System", count: undefined, alert: 0 },
     { id: "alerts", label: "Alerts", count: undefined, alert: 0 },
-    { id: "projects", label: "Projects", count: counts.projects, alert: 0 },
     { id: "settings", label: "Settings", count: undefined, alert: 0 },
+    { id: "projects", label: "Projects", count: counts.projects, alert: 0 },
   ];
   return (
     <aside className="fixed inset-y-0 left-0 z-50 hidden w-48 flex-col border-r border-line-soft bg-bg/60 px-6 py-7 backdrop-blur-sm lg:flex">
@@ -213,22 +219,67 @@ function Dashboard() {
     if (id === "projects") setBrowsePath(null);
   };
   // The open live drive view (Build 1). Lifted here so it overlays the whole
-  // dashboard; closes itself if the session it points at ends.
+  // dashboard. A session opened by deep-link or right after originate may not
+  // be in the snapshot YET — resolveDriveTarget separates "still settling"
+  // (keep it mounted, it streams by id) from "genuinely gone" (surface a
+  // notice, don't silently bounce to the dashboard). See lib/driveTarget.
   const [driveSessionId, setDriveSessionId] = useState<string | null>(null);
-  const driveSession =
+  const [driveNotice, setDriveNotice] = useState<string | null>(null);
+  const driveOpenedAt = useRef<number>(0);
+  const driveEverPresent = useRef(false);
+  const openDrive = (sessionId: string) => {
+    driveOpenedAt.current = Date.now();
+    driveEverPresent.current = false;
+    setDriveNotice(null);
+    setDriveSessionId(sessionId);
+  };
+  const snapDriveSession =
     snap?.sessions.find((s) => s.sessionId === driveSessionId) ?? null;
+  if (snapDriveSession) driveEverPresent.current = true;
+  const driveResolution = driveSessionId
+    ? resolveDriveTarget({
+        present: !!snapDriveSession,
+        everPresent: driveEverPresent.current,
+        msSinceOpen: now - driveOpenedAt.current,
+        graceMs: DRIVE_SETTLE_GRACE_MS,
+      })
+    : "gone";
   useEffect(() => {
-    if (driveSessionId && snap?.generatedAt && !driveSession) {
-      setDriveSessionId(null); // the session ended — drop back to the dashboard
+    if (driveSessionId && snap?.generatedAt && driveResolution === "gone") {
+      setDriveNotice(
+        driveEverPresent.current
+          ? "That session has ended."
+          : "That session isn’t available (it may have ended or never started).",
+      );
+      setDriveSessionId(null);
     }
-  }, [driveSessionId, driveSession, snap?.generatedAt]);
+  }, [driveSessionId, driveResolution, snap?.generatedAt]);
+  // While driving a live session use the real record; while it's still settling
+  // (resolving) mount a minimal stand-in so DriveView streams by id — the
+  // composer stays disabled until the real record (with its tmux target) lands.
+  const driveSession =
+    snapDriveSession ??
+    (driveSessionId && driveResolution === "resolving"
+      ? ({ sessionId: driveSessionId, live: true, cwd: "", lastActivityAt: now } as SessionInfo)
+      : null);
+  // The open view-only transcript (story 2-2 / AC2.4). Opened for an inactive
+  // session by id; resolved from the snapshot when present, else a minimal
+  // session synthesized from the search hit (a session beyond maxHistory isn't
+  // in snap.sessions, but the transcript content streams off the id regardless).
+  const [transcript, setTranscript] = useState<SessionInfo | null>(null);
+  const openTranscript = (sessionId: string) => {
+    const known = snap?.sessions.find((s) => s.sessionId === sessionId);
+    setTranscript(
+      known ?? { sessionId, live: false, cwd: "", lastActivityAt: 0 },
+    );
+  };
   // Deep link: a push notification (or any /?session=<id> link) opens that
   // session's drive view straight away — tap the approval push, land where you
   // can answer (M8). Clean the URL so a manual refresh doesn't re-trigger.
   useEffect(() => {
     const sid = new URLSearchParams(window.location.search).get("session");
     if (sid) {
-      setDriveSessionId(sid);
+      openDrive(sid);
       window.history.replaceState(null, "", window.location.pathname);
     }
   }, []);
@@ -274,13 +325,28 @@ function Dashboard() {
       node: (
         <SessionsPane
           sessions={snap.sessions}
+          projects={snap.projects}
           now={now}
           summarize={snap.summarize}
-          onOpenDrive={setDriveSessionId}
+          onOpenDrive={openDrive}
         />
       ),
     },
-    { id: "system", label: "System", alert: 0, node: <SystemPane system={snap.system} now={now} /> },
+    {
+      id: "resume",
+      label: "Resume",
+      alert: 0,
+      node: (
+        <ResumeablePane
+          sessions={snap.sessions}
+          projects={snap.projects}
+          now={now}
+          onOpenDrive={openDrive}
+          onOpenTranscript={openTranscript}
+        />
+      ),
+    },
+    { id: "system", label: "System", alert: 0, node: <SystemPane system={snap.system} diagnostics={snap.diagnostics} now={now} /> },
     { id: "alerts", label: "Alerts", alert: 0, node: <AlertsPane /> },
     { id: "settings", label: "Settings", alert: 0, node: <SettingsPane /> },
     {
@@ -293,6 +359,7 @@ function Dashboard() {
           now={now}
           openPath={browsePath}
           onOpenChange={setBrowsePath}
+          onOpenDrive={openDrive}
         />
       ),
     },
@@ -306,8 +373,31 @@ function Dashboard() {
     <div className="min-h-screen">
       {driveSession && (
         <DriveView
+          key={driveSession.sessionId}
           session={driveSession}
           onClose={() => setDriveSessionId(null)}
+          onRestarted={openDrive}
+        />
+      )}
+      {driveNotice && (
+        <button
+          onClick={() => setDriveNotice(null)}
+          className="fixed inset-x-0 top-[52px] z-[70] mx-auto flex max-w-md items-center gap-2 rounded-lg border border-gold-dim/60 bg-panel px-4 py-2.5 text-[12.5px] text-ink shadow-lg lg:top-4"
+        >
+          <Dot tone="gold" />
+          <span className="flex-1 text-left">{driveNotice}</span>
+          <span className="text-[11px] text-ink-mute">dismiss</span>
+        </button>
+      )}
+      {transcript && (
+        <TranscriptView
+          session={transcript}
+          now={now}
+          onClose={() => setTranscript(null)}
+          onResume={(sid) => {
+            setTranscript(null);
+            openDrive(sid);
+          }}
         />
       )}
       <Rail
@@ -346,6 +436,14 @@ function Dashboard() {
               </span>
             )}
           </div>
+          {/* Staleness chip — every form factor. A frozen dashboard must never
+              be indistinguishable from a live one (the rail's indicator is
+              desktop-only; this is the one the phone sees). */}
+          {!connected && (
+            <span className="shrink-0 rounded-full border border-danger/50 bg-danger/10 px-2.5 py-0.5 text-[11px] font-medium text-danger">
+              {staleLabel(snap.generatedAt, now)} · reconnecting…
+            </span>
+          )}
           <div className="hidden items-center gap-5 sm:flex">
             <div className="w-20">
               <Meter

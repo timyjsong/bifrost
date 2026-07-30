@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { groupSessions, splitColumns, queueStatusOf } from "./selectors";
+import {
+  groupSessions,
+  splitColumns,
+  queueStatusOf,
+  sessionAlertsEnabled,
+} from "./selectors";
 import type { SessionInfo } from "../../../shared/types";
 
 const s = (over: Partial<SessionInfo>): SessionInfo => ({
@@ -51,5 +56,15 @@ describe("queueStatusOf", () => {
     expect(queueStatusOf("q", sum)).toBe("queued");
     expect(queueStatusOf("z", sum)).toBeUndefined();
     expect(queueStatusOf("a", undefined)).toBeUndefined();
+  });
+});
+
+describe("sessionAlertsEnabled", () => {
+  test("defaults on when the flag is absent", () => {
+    expect(sessionAlertsEnabled(s({}))).toBe(true);
+  });
+  test("only an explicit false mutes", () => {
+    expect(sessionAlertsEnabled(s({ alertsEnabled: false }))).toBe(false);
+    expect(sessionAlertsEnabled(s({ alertsEnabled: true }))).toBe(true);
   });
 });

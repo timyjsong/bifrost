@@ -349,7 +349,7 @@ describe("deriveVia", () => {
     // direct ssh: claude(200) ← bash(190) ← sshd(180)
     proc(200, { ppid: 190, tty: "pts/5", command: "claude" }),
     proc(190, { ppid: 180, tty: "pts/5", command: "-bash" }),
-    proc(180, { ppid: 1, command: "sshd: user@pts/5" }),
+    proc(180, { ppid: 1, command: "sshd: dev@pts/5" }),
     // desktop-remote: claude(300) ← remote server(290, reparented to init)
     proc(300, { ppid: 290, command: "/home/you/.claude/remote/ccd-cli/2.1.170" }),
     proc(290, { ppid: 1, command: "/home/you/.claude/remote/srv/abc/server" }),

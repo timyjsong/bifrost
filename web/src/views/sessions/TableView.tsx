@@ -2,9 +2,10 @@ import { useState } from "react";
 import type { SessionInfo } from "../../../../shared/types";
 import { basename, fmtTokens, relTime } from "../../lib/format";
 import { gaugeModel } from "../../lib/cardModel";
-import { queueStatusOf } from "../../lib/selectors";
+import { queueStatusOf, sessionAlertsEnabled } from "../../lib/selectors";
 import { Bar, Dot, Panel } from "../../components/ui";
 import { SummaryBlock } from "../../components/SummaryBlock";
+import { AlertMuteToggle } from "../../components/AlertMuteToggle";
 import type { SessionsViewProps } from "./types";
 
 function stateLabel(s: SessionInfo, now: number): { text: string; cls: string } {
@@ -89,6 +90,9 @@ function Row({
           />
         </div>
       )}
+      </div>
+      <div className="flex shrink-0 items-center border-l border-line-soft px-2">
+        <AlertMuteToggle sessionId={s.sessionId} enabled={sessionAlertsEnabled(s)} />
       </div>
       <button
         onClick={onOpen}

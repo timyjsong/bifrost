@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   CATALOG,
   type AlertPolicy,
+  type RecentAlert,
   type SignalDef,
   type SignalPolicy,
 } from "../../../shared/alerts";
@@ -13,12 +14,60 @@ import {
   disableAlerts,
   enableAlerts,
   fetchPolicy,
+  fetchRecentAlerts,
   registerServiceWorker,
   savePolicy,
   sendTestPush,
   type PushStatus,
 } from "../lib/push";
-import { Chip, Panel, SectionTitle } from "./ui";
+import { relTime } from "../lib/format";
+import { Chip, Dot, Panel, SectionTitle } from "./ui";
+
+const SEV_TONE: Record<RecentAlert["severity"], "mute" | "gold" | "danger"> = {
+  info: "mute",
+  warn: "gold",
+  crit: "danger",
+};
+
+function RecentFeed({ alerts }: { alerts: RecentAlert[] }) {
+  const now = Date.now();
+  return (
+    <Panel className="mb-3">
+      <div className="border-b border-line-soft px-4 py-2 text-[11px] uppercase tracking-[0.14em] text-ink-mute">
+        recent
+        <span className="ml-2 normal-case tracking-normal text-ink-mute/70">
+          what fired — a record even if the push was missed
+        </span>
+      </div>
+      {alerts.length === 0 && (
+        <div className="px-4 py-4 text-[12px] text-ink-mute">nothing fired yet</div>
+      )}
+      {alerts.map((a) => {
+        const deepLink = a.instance
+          ? () => window.location.assign(`/?session=${encodeURIComponent(a.instance!)}`)
+          : undefined;
+        return (
+          <div
+            key={`${a.firedAt}-${a.id}-${a.instance ?? ""}`}
+            onClick={deepLink}
+            className={`flex items-center gap-3 border-b border-line-soft px-4 py-2 text-[12px] last:border-b-0 ${
+              deepLink ? "cursor-pointer hover:bg-panel-raised/60" : ""
+            }`}
+          >
+            <Dot tone={SEV_TONE[a.severity]} />
+            <span className="min-w-0 flex-1">
+              <span className="text-ink-dim">{a.title}</span>
+              <span className="ml-2 text-ink-mute">{a.body}</span>
+            </span>
+            <span className="shrink-0 font-mono text-[11px] text-ink-mute/70 tabular-nums">
+              {relTime(a.firedAt, now)}
+            </span>
+          </div>
+        );
+      })}
+    </Panel>
+  );
+}
 
 const COOLDOWNS: Array<{ sec: number; label: string }> = [
   { sec: 30, label: "30s" },
@@ -172,6 +221,7 @@ export function AlertsPane() {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string>("");
   const [policy, setPolicy] = useState<AlertPolicy | null>(cachedPolicy());
+  const [recent, setRecent] = useState<RecentAlert[]>([]);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function refreshStatus() {
@@ -186,6 +236,13 @@ export function AlertsPane() {
       .catch(() => {
         /* offline — the localStorage cache (already in state) stands in */
       });
+  }, []);
+
+  useEffect(() => {
+    const load = () => void fetchRecentAlerts().then(setRecent).catch(() => {});
+    load();
+    const t = setInterval(load, 10_000); // alerts are low-frequency
+    return () => clearInterval(t);
   }, []);
 
   function update(id: string, patch: Partial<SignalPolicy>) {
@@ -243,6 +300,8 @@ export function AlertsPane() {
           {note && <span className="text-[11.5px] text-ink-mute">{note}</span>}
         </div>
       </Panel>
+
+      <RecentFeed alerts={recent} />
 
       {policy &&
         byTier.map((tier) => {

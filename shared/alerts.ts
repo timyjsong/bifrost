@@ -41,6 +41,22 @@ export type SignalKind = "edge" | "gauge" | "rate" | "transition";
 
 export type Severity = "info" | "warn" | "crit";
 
+/**
+ * A fired alert recorded into the bounded recent-feed (a projection of the
+ * engine's FiredAlert + a fire timestamp). Surfaced at GET /api/alerts/recent so
+ * a device that missed — or never subscribed to — the push still has a record.
+ * In-memory / ephemeral, like the push itself.
+ */
+export interface RecentAlert {
+  id: SignalId;
+  tier: number;
+  severity: Severity;
+  title: string;
+  body: string;
+  instance?: string; // session id, when session-scoped — deep-links to the drive view
+  firedAt: number;
+}
+
 export interface ThresholdMeta {
   min: number;
   max: number;
@@ -87,7 +103,7 @@ export const CATALOG: SignalDef[] = [
     kind: "edge",
     severity: "crit",
     label: "RAM ceiling hit",
-    desc: "user-1000.slice hit its memory.max wall (allocations refused).",
+    desc: "The user slice hit its memory.max wall (allocations refused).",
     defaultEnabled: true,
     defaultCooldownSec: 60,
   },
@@ -205,8 +221,10 @@ export const CATALOG: SignalDef[] = [
     kind: "transition",
     severity: "crit",
     label: "Safeguard unhealthy",
-    desc: "claude-limits failed, its timer stalled, or a limit reverted to max.",
-    defaultEnabled: true,
+    desc: "The configured safeguard unit failed, its timer stalled, or a limit reverted to max.",
+    // Off unless you point `alerts.limitsUnit` at a real unit. A crit-severity
+    // signal about a unit the installer never configured is pure false alarm.
+    defaultEnabled: false,
     defaultCooldownSec: 300,
   },
   {

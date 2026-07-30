@@ -1,12 +1,15 @@
 import { apiFetch } from "./api";
+import type { SpawnModelAlias } from "../../../shared/types";
 
 /** App settings mirror (server is the source of truth). */
 export interface Settings {
   /** Send grace period (ms) before a submitted prompt is injected; 0 = send now. */
   sendDelayMs: number;
+  /** Model the originate picker preselects for new sessions. */
+  defaultModel: SpawnModelAlias;
 }
 
-export const DEFAULT_SETTINGS: Settings = { sendDelayMs: 3000 };
+export const DEFAULT_SETTINGS: Settings = { sendDelayMs: 3000, defaultModel: "opus" };
 
 export async function fetchSettings(): Promise<Settings> {
   try {

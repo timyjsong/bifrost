@@ -7,7 +7,13 @@ import webpush from "web-push";
 import { readJson, writeJsonAtomic } from "./store";
 
 const FILE = "vapid.json";
-const SUBJECT = process.env.BIFROST_VAPID_SUBJECT ?? "mailto:admin@example.com";
+// Neutral fallback — the real contact comes from cfg.alerts.vapidSubject via
+// setVapidSubject at boot (an existing keypair keeps its persisted subject).
+let SUBJECT = "mailto:admin@example.com";
+
+export function setVapidSubject(subject: string): void {
+  SUBJECT = subject;
+}
 
 export interface Vapid {
   subject: string;

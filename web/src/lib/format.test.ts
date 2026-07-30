@@ -7,6 +7,7 @@ import {
   fmtUptime,
   basename,
   tildify,
+  clip,
 } from "./format";
 
 const NOW = Date.parse("2026-06-11T12:00:00Z");
@@ -59,5 +60,18 @@ describe("paths", () => {
   test("basename and tildify", () => {
     expect(basename("/home/you/projects/ledger-api")).toBe("ledger-api");
     expect(tildify("/home/you/projects/ledger-api")).toBe("~/projects/ledger-api");
+  });
+});
+
+describe("clip", () => {
+  test("leaves anything within budget untouched", () => {
+    expect(clip("short", 10)).toBe("short");
+    expect(clip("exactly10!", 10)).toBe("exactly10!");
+  });
+
+  test("never exceeds the budget — the ellipsis is paid for out of it", () => {
+    const out = clip("abcdefghijk", 5);
+    expect(out).toBe("abcd…");
+    expect(out.length).toBe(5);
   });
 });

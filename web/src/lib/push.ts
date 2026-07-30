@@ -4,7 +4,7 @@
  * VAPID key decode — are split out and unit-tested; the rest wraps browser APIs
  * (navigator/Notification/PushManager) and only runs in the page.
  */
-import type { AlertPolicy } from "../../../shared/alerts";
+import type { AlertPolicy, RecentAlert } from "../../../shared/alerts";
 import { apiFetch } from "./api";
 
 export type PushStatus =
@@ -125,6 +125,12 @@ export function cachedPolicy(): AlertPolicy | null {
   } catch {
     return null;
   }
+}
+
+export async function fetchRecentAlerts(): Promise<RecentAlert[]> {
+  return apiFetch("/api/alerts/recent")
+    .then((r) => r.json())
+    .then((d) => (d.alerts as RecentAlert[]) ?? []);
 }
 
 export async function fetchPolicy(): Promise<AlertPolicy> {

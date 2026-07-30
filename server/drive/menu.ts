@@ -24,10 +24,17 @@ const BOTTOM_WINDOW = 8; // an active menu lives at the bottom of the pane
 
 export function parsePermissionMenu(paneText: string): PermissionMenu | null {
   // Non-empty, chrome-stripped lines (positions among non-empty lines preserved).
+  // Track which lines carried the ❯ cursor BEFORE stripping: a cursored
+  // numbered row is strong evidence of a real interactive menu (conversation
+  // text never renders cursors), which relaxes the prompt-line gate below.
   const ne: string[] = [];
+  const cursored: boolean[] = [];
   for (const raw of paneText.split("\n")) {
     const s = strip(raw);
-    if (s) ne.push(s);
+    if (s) {
+      ne.push(s);
+      cursored.push(/❯\s*\d+\./.test(raw));
+    }
   }
   if (ne.length < 2) return null;
 
@@ -61,10 +68,19 @@ export function parsePermissionMenu(paneText: string): PermissionMenu | null {
   //    output has the input box / more text below it.
   const lastOptIdx = runStart + options.length - 1;
   if (lastOptIdx < ne.length - BOTTOM_WINDOW) return null;
-  // 2. A question line ("…?") within the 3 lines just above the options.
+  // 2. A question line ("…?") within the 3 lines just above the options — OR,
+  //    when an option row carries the ❯ cursor (a selectable TUI menu, e.g.
+  //    the rewind confirm), a prompt line ending in ":" qualifies too. The
+  //    "?" -only gate was the M5 false-fire fix; the cursor is the equally
+  //    strong signal that this is chrome, not conversation.
+  const hasCursoredOption = cursored
+    .slice(runStart, runStart + options.length)
+    .some(Boolean);
+  // The rewind confirm interposes four context lines (quoted message, age,
+  // fork/code notes) between its colon-prompt and the options — 6 covers it.
   let prompt = "";
-  for (let j = runStart - 1; j >= 0 && j >= runStart - 3; j--) {
-    if (ne[j].endsWith("?")) {
+  for (let j = runStart - 1; j >= 0 && j >= runStart - 6; j--) {
+    if (ne[j].endsWith("?") || (hasCursoredOption && ne[j].endsWith(":"))) {
       prompt = ne[j];
       break;
     }
@@ -80,22 +96,26 @@ export function isValidAnswerKey(key: string): boolean {
   return /^[1-9]$/.test(key) || key === "Enter";
 }
 
-// The status bar shows "esc to interrupt" exactly while the MAIN turn is running
-// (control not yet yours), and flips to "← for agents" the instant control returns
-// — even with background shells/agents still going ("· N shells · ← for agents").
-// So this marker is the precise "mid-processing" signal: true only while the turn
-// is in flight, FALSE at soft idle (returned, bg work pending) and true idle alike.
-// Verified live: present continuously through a turn, gone the instant it ends.
-// (The older "(Ns · …)" elapsed-timer heuristic was dropped — it FLICKERED, absent
-// at turn start and between thinking phases → false negatives, and a "N shell still
-// running" line could read as work.)
-const WORKING = /esc to interrupt/;
+// The working signal, re-derived 2026-07-02: the current Claude Code TUI no
+// longer renders "esc to interrupt" (verified across full turns at 220 cols),
+// so the primary evidence is the spinner's elapsed-timer segment — a
+// parenthesized "(Ns · …)" group ("(2s · thinking)", "(16s · ↓ 1.5k tokens)",
+// "(Stop hooks… 1/3 · 16s · …)") that only renders while a turn is in flight.
+// At 500ms sampling it read CONTINUOUS through a live turn; the pane route
+// additionally smooths transitional redraws with a short server-side hold
+// (workingHold.ts). The old literal stays as an OR for TUI versions/panes
+// that still show it. The spinner line sits above the input box (~7 chrome
+// lines), so the scan window is the last 10 non-empty lines.
+const WORKING_LITERAL = /esc to interrupt/;
+const TURN_TIMER = /\([^)\n]*\b\d+m?\s?\d*s\s*·[^)\n]*\)/;
 
 export function isPaneWorking(paneText: string): boolean {
-  // the status bar is pinned at the foot of the pane; scan only the bottom region
-  // so a stray "esc to interrupt" in transcript scrollback can't false-positive.
-  const lines = paneText.split("\n").filter((l) => l.trim());
-  return lines.slice(-6).some((l) => WORKING.test(l));
+  const foot = paneText
+    .split("\n")
+    .filter((l) => l.trim())
+    .slice(-10)
+    .join("\n");
+  return WORKING_LITERAL.test(foot) || TURN_TIMER.test(foot);
 }
 
 /** Read the current permission mode off a captured pane, or null if the status
@@ -108,4 +128,56 @@ export function parsePermissionMode(paneText: string): PermissionMode | null {
   if (/accept edits on/.test(t)) return "accept-edits";
   if (/auto mode on/.test(t)) return "auto";
   return null;
+}
+
+/** The pane route's mode reading. The current TUI renders NOTHING on the status
+ *  bar for the default mode (verified live 2026-07-02), so a readable capture
+ *  with no mode string means "auto" — but an EMPTY capture (pane vanished
+ *  mid-read) stays null: unknown, never a guessed mode. */
+export function modeFromPane(paneText: string): PermissionMode | null {
+  if (!paneText.trim()) return null;
+  return parsePermissionMode(paneText) ?? "auto";
+}
+
+/**
+ * A "working" reading is suspect if the timer says a turn is running but the
+ * transcript hasn't been written in a VERY long time — a live turn streams
+ * block-lines to the transcript, so a lingering timer over a long-idle
+ * transcript is likely a stale/misread signal (e.g. a completed-turn summary
+ * line that kept a `(Ns · …)` segment → send button stuck as "stop").
+ *
+ * The threshold is deliberately generous (3 min): a legitimate long tool call
+ * (a slow build) also shows timer-present + transcript-idle, so a short window
+ * would false-positive on normal work. Only a genuinely stuck signal persists
+ * past minutes. This catches the "stuck true" failure mode; the inverse (the
+ * timer format changing so `working` reads FALSE always) can't be seen from
+ * mtime and remains an inherent limit of an empirical signal.
+ */
+export const WORKING_DRIFT_IDLE_MS = 180_000;
+
+/**
+ * Drift guard: literal-keyed signals shift across Claude Code releases, and
+ * their failure mode is SILENT mis-gating. Detects: the mode-cycle hint without
+ * a recognizable mode string (mode pill dead), and — when `transcriptIdleMs` is
+ * supplied — a stuck "working" timer over a long-idle transcript (see above).
+ */
+export function detectSignalDrift(
+  paneText: string,
+  transcriptIdleMs?: number,
+): ("working" | "mode")[] {
+  const drift: ("working" | "mode")[] = [];
+  const foot = paneText
+    .split("\n")
+    .filter((l) => l.trim())
+    .slice(-10)
+    .join("\n");
+  if (
+    transcriptIdleMs !== undefined &&
+    TURN_TIMER.test(foot) &&
+    transcriptIdleMs > WORKING_DRIFT_IDLE_MS
+  )
+    drift.push("working");
+  if (/shift\+tab to cycle/i.test(foot) && parsePermissionMode(paneText) === null)
+    drift.push("mode");
+  return drift;
 }

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import type { SessionInfo, Snapshot } from "../../../shared/types";
+import type { ProjectInfo, SessionInfo, Snapshot } from "../../../shared/types";
 import { groupSessions } from "../lib/selectors";
 import { applyFilters, NO_FILTERS, type SessionFilters } from "../lib/sessionFilters";
 import { SectionTitle } from "./ui";
 import { SessionFilterBar } from "./SessionFilterBar";
+import { OriginateDialog } from "./OriginateDialog";
 import { SESSIONS_VIEWS, DEFAULT_VIEW } from "../views/sessions";
 
 const VIEW_KEY = "bifrost.sessions.view";
@@ -38,11 +39,13 @@ function useIsWide(): boolean {
  */
 export function SessionsPane({
   sessions,
+  projects,
   now,
   summarize,
   onOpenDrive,
 }: {
   sessions: SessionInfo[];
+  projects: ProjectInfo[];
   now: number;
   summarize: Snapshot["summarize"];
   onOpenDrive: (sessionId: string) => void;
@@ -52,6 +55,7 @@ export function SessionsPane({
     () => localStorage.getItem(VIEW_KEY) ?? DEFAULT_VIEW,
   );
   const [filters, setFilters] = useState<SessionFilters>(loadFilters);
+  const [newSession, setNewSession] = useState(false);
   const view =
     SESSIONS_VIEWS.find((v) => v.id === viewId) ?? SESSIONS_VIEWS[0];
   // Only live sessions reach the views; filter that population, then group.
@@ -70,11 +74,31 @@ export function SessionsPane({
 
   return (
     <section id="sessions" className="scroll-mt-[72px]">
+      {newSession && (
+        <OriginateDialog
+          cwd=""
+          projectName=""
+          projects={projects}
+          onClose={() => setNewSession(false)}
+          onStarted={(sessionId) => {
+            setNewSession(false);
+            onOpenDrive(sessionId);
+          }}
+        />
+      )}
       <SectionTitle
         title="Sessions"
         hint={`${interactive} live${headless > 0 ? ` · ${headless} headless` : ""}`}
         right={
-          <div className="flex gap-1.5">
+          <div className="flex items-center gap-1.5">
+            {projects.length > 0 && (
+              <button
+                onClick={() => setNewSession(true)}
+                className="rounded-full border border-gold-dim/60 bg-gold-dim/10 px-3 py-0.5 text-[11px] text-gold transition-colors hover:bg-gold-dim/20"
+              >
+                + new session
+              </button>
+            )}
             {SESSIONS_VIEWS.map((v) => (
               <button
                 key={v.id}

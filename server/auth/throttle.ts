@@ -16,6 +16,17 @@ export function isThrottled(ip: string, now: number): boolean {
   return recent(ip, now).length >= THROTTLE_MAX_FAILS;
 }
 
+/**
+ * Whether the brute-force throttle should block THIS request. Scoped to the
+ * auth-decision surface: only a request WITHOUT a valid token can be blocked, so
+ * a shared proxy IP's failed auths never lock out a valid-token device (the
+ * throttle key is the socket IP, which on the HTTPS route is caddy — shared
+ * across every device). The caller verifies the token first, then consults this.
+ */
+export function throttleBlocks(tokenValid: boolean, ip: string, now: number): boolean {
+  return !tokenValid && isThrottled(ip, now);
+}
+
 export function recordFailure(ip: string, now: number): void {
   const arr = recent(ip, now);
   arr.push(now);

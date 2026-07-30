@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { getCapture } from "../lib/drive";
+import { startGuardedPoll } from "../lib/poll";
 
 /**
  * The raw-terminal fallback (M6) — a live xterm.js mirror of the session's pane,
@@ -42,17 +43,17 @@ export function RawTerminal({ sessionId }: { sessionId: string }) {
     window.addEventListener("resize", refit);
 
     let alive = true;
-    const poll = async () => {
+    // Guarded poll (was setInterval): a slow capture never lets the next redraw
+    // fire before this one lands.
+    const stopPoll = startGuardedPoll(async () => {
       const text = await getCapture(sessionId);
       if (!alive || text === null) return;
       term.write("\x1b[H\x1b[2J" + text); // home + clear + redraw the live frame
-    };
-    void poll();
-    const t = setInterval(poll, 800);
+    }, 800);
 
     return () => {
       alive = false;
-      clearInterval(t);
+      stopPoll();
       window.removeEventListener("resize", refit);
       term.dispose();
     };

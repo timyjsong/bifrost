@@ -86,6 +86,65 @@ export async function sendKey(target: string, key: string): Promise<void> {
   await tmux(["send-keys", "-t", target, key]);
 }
 
+// The spawn size (spawn/spawn.ts argv builders). The TUI's tall full-screen
+// pickers (rewind, model) clip their header/footer when the window is smaller —
+// an attached client shrinks it and the size can outlive the detach.
+export const MENU_COLS = 220;
+export const MENU_ROWS = 50;
+
+export type ViewportVerdict = "ok" | "resize" | "attached-small";
+
+/** Pure decision: can `target`'s window render a tall picker, and if not, may
+ *  we resize it? A window held small by an ATTACHED client is left alone —
+ *  resizing under a live human terminal is worse than failing loud. */
+export function viewportVerdict(
+  attached: number,
+  width: number,
+  height: number,
+): ViewportVerdict {
+  if (width >= MENU_COLS && height >= MENU_ROWS) return "ok";
+  return attached > 0 ? "attached-small" : "resize";
+}
+
+/** Restore an unattached window to the spawn size before opening a tall picker.
+ *  Returns false when an attached client pins it small — the caller surfaces
+ *  that as the failure reason instead of a misparse. */
+export async function ensureMenuViewport(target: string): Promise<boolean> {
+  const proc = Bun.spawn(
+    [
+      "tmux", "display-message", "-p", "-t", target,
+      "#{session_attached} #{window_width} #{window_height}",
+    ],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  const [att, w, h] = out.trim().split(/\s+/).map(Number);
+  const verdict = viewportVerdict(att || 0, w || 0, h || 0);
+  if (verdict === "ok") return true;
+  if (verdict === "attached-small") return false;
+  await tmux(["resize-window", "-t", target, "-x", String(MENU_COLS), "-y", String(MENU_ROWS)]);
+  await Bun.sleep(250); // let Ink redraw at the new size
+  return true;
+}
+
+/** Poll `read` until it yields non-null. Full-screen pickers can render slowly
+ *  under load (service startup, big scrollback) — a single fixed-delay capture
+ *  races that and a premature give-up Esc leaves the command text restored in
+ *  the input box. */
+export async function pollPane<T>(
+  read: () => Promise<T | null>,
+  tries = 12,
+  intervalMs = 400,
+): Promise<T | null> {
+  for (let i = 0; i < tries; i++) {
+    const r = await read();
+    if (r) return r;
+    await Bun.sleep(intervalMs);
+  }
+  return null;
+}
+
 /** Read the visible content of a pane (Channel 3 — ephemeral TUI state not in
  *  the transcript, e.g. a pending permission menu). Read-only. With
  *  `escapes`, includes SGR colour sequences for the xterm.js raw mirror; without,

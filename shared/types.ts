@@ -33,7 +33,23 @@ export interface SessionInfo {
   childProcs?: number;
   children?: ChildProc[]; // leaf subprocesses currently running under this session
   alertsEnabled?: boolean; // per-card mute (default on); false = no session alerts fire
+  pinned?: boolean; // Bifrost-owned: kept surfaced, bypassing the history/maxHistory cutoffs
   nowDoing?: string; // last assistant text snippet
+}
+
+/**
+ * One row of the full *uncapped* session index, exposed for client-side name
+ * search (story 2-2 / AC2.2). The dashboard snapshot is capped at maxHistory;
+ * search needs the whole pile, so the index ships once and the matcher runs
+ * in-memory per keystroke (no network round-trip). Only the fields a name search
+ * + a click-through need — never the deep-parsed transcript.
+ */
+export interface SessionIndexEntry {
+  sessionId: string;
+  cwd: string;
+  customTitle?: string; // the user-set name, if any (else search falls back to cwd basename)
+  mtimeMs: number; // last transcript activity — for ordering search hits
+  live: boolean; // currently tmux-resident (routes to drive, not a view-only open)
 }
 
 export interface ChildProc {
@@ -73,6 +89,13 @@ export interface FileEntry {
 export interface DirListing {
   path: string; // canonical (realpath'd) directory that was listed
   entries: FileEntry[];
+}
+
+/** `/api/dirs` — the originate picker's directory browser (dirs only). */
+export interface DirPick {
+  path: string; // canonical directory being shown
+  parent: string | null; // one level up, or null at the browse root
+  dirs: string[]; // subdirectory names (dot-folders hidden)
 }
 
 export interface ProcInfo {
@@ -168,6 +191,7 @@ export interface PaneState {
   working: boolean; // the MAIN turn is in flight (live pane — control not yours yet)
   pendingSend: boolean; // a send is parked server-side (grace window) — any device
   mode: PermissionMode | null; // current permission mode read off the pane (null if unknown)
+  drift: ("working" | "mode")[]; // TUI literals the parsers could not reconcile (drift guard)
 }
 
 // A slash command the suggester can offer. Non-authoritative: built-ins are a
@@ -178,6 +202,46 @@ export interface SlashCommand {
   source: "builtin" | "user" | "project" | "skill";
 }
 
+/**
+ * Rich system-health signals the alert engine derives each tick, surfaced as
+ * product so the dashboard shows them — not just the /proc load/mem/disk in
+ * SystemInfo. Structural mirror of server/alerts/sources.ts AlertSources; the
+ * counters are monotonic since the slice started. Optional: a source hiccup
+ * omits it and the panel simply doesn't render that tick.
+ */
+export interface SystemDiagnostics {
+  oomKill: number; // cgroup oom_kill counter (since slice start)
+  ramWall: number; // memory.max wall hits — allocations refused
+  swapPct: number; // slice swap.current / swap.max, 0..100
+  swapCurrentKb: number;
+  sliceMaxKb: number | null; // slice memory.max cap; null = unbounded
+  psiMemSome: number; // /proc/pressure/memory  some avg10
+  servicesDown: string[]; // watched units currently down
+  limitsHealthy: boolean; // the memory-safeguard itself
+  limitsReason?: string;
+}
+
+/**
+ * One idle-park action-log line (data/park-log.jsonl). In observe-only mode
+ * (the default until I arm it) every parkable session is logged as it WOULD be
+ * parked — the readiness evidence I review before flipping lifecycle.enabled.
+ */
+export interface ParkLogEntry {
+  at: number;
+  uuid: string;
+  mode: "kill" | "observe";
+  cwd: string;
+  idleMs: number;
+}
+
+/** Idle-park observe surface — the arming-readiness view (GET /api/lifecycle/park). */
+export interface ParkStatus {
+  enabled: boolean; // is auto-park armed (lifecycle.enabled)
+  idleParkMs: number; // the idle window before a session is parkable
+  entries: ParkLogEntry[]; // recent action-log entries, newest first
+  parkedCount: number; // sessions currently parked (armed only)
+}
+
 export interface Snapshot {
   generatedAt: number;
   bundleId?: number; // dist/index.html mtime — frontend reloads when it changes
@@ -185,4 +249,16 @@ export interface Snapshot {
   projects: ProjectInfo[];
   sessions: SessionInfo[];
   system: SystemInfo;
+  diagnostics?: SystemDiagnostics; // alert-engine signals, surfaced for the System pane
 }
+
+/** The spawnable-model allowlist — SINGLE SOURCE for the server's spawn guard
+ *  and the picker UI (alias = claude CLI family alias; label = display). */
+export const SPAWN_MODELS = [
+  { alias: "opus", label: "Opus 4.8" },
+  { alias: "sonnet", label: "Sonnet 4.6" },
+  { alias: "haiku", label: "Haiku" },
+  { alias: "fable", label: "Fable 5" },
+] as const;
+
+export type SpawnModelAlias = (typeof SPAWN_MODELS)[number]["alias"];

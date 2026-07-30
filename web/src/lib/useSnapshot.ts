@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Snapshot } from "../../../shared/types";
 import { apiFetch, sseStream } from "./api";
+import { SNAPSHOT_QUIET_MS, streamQuiet } from "./staleness";
 
 export interface SnapshotState {
   snap: Snapshot | null;
@@ -29,8 +30,11 @@ export function useSnapshot(): SnapshotState {
       return false;
     };
 
-    const ac = new AbortController();
     let stopped = false;
+    // Per-attempt controller so the watchdog can kill a HUNG stream (half-dead
+    // TCP: reader pending forever, no FIN) and the loop redials — the old
+    // single controller could only tear down on unmount.
+    let attempt: AbortController | null = null;
 
     const pollState = async () => {
       try {
@@ -46,34 +50,40 @@ export function useSnapshot(): SnapshotState {
 
     // The live stream, over fetch (so the token header rides along). EventSource
     // would auto-reconnect; here we own the retry loop — reconnect after a beat
-    // whenever the stream ends or errors, until the effect unmounts.
+    // whenever the stream ends, errors, or is watchdog-aborted for silence.
     const run = async () => {
       while (!stopped) {
+        attempt = new AbortController();
+        lastEvent.current = Date.now(); // quiet counts from connection open
         try {
-          for await (const frame of sseStream("/api/events", ac.signal)) {
+          for await (const frame of sseStream("/api/events", attempt.signal)) {
+            lastEvent.current = Date.now(); // ANY frame — pings included
             if (frame.event !== "snapshot") continue;
-            lastEvent.current = Date.now();
             setConnected(true);
             const next: Snapshot = JSON.parse(frame.data);
             if (applyBundle(next)) return; // reloading — stop the loop
             setSnap(next);
           }
         } catch (err) {
-          if (stopped || ac.signal.aborted) return;
+          if (stopped) return;
           if ((err as Error).message === "unauthenticated") return; // enroll takes over
         }
+        if (stopped) return;
         setConnected(false);
         await new Promise((r) => setTimeout(r, 2000));
       }
     };
     void run();
 
-    // Belt and braces: if the stream goes quiet, poll once and flag it.
+    // The watchdog: silence past the threshold means the stream is hung, not
+    // idle (snapshots push every few seconds, heartbeats every 25s). Flag it,
+    // poll once for fresh data, and abort the attempt so the loop redials.
     const watchdog = setInterval(() => {
-      if (Date.now() - lastEvent.current < 15_000) return;
+      if (!streamQuiet(lastEvent.current, Date.now(), SNAPSHOT_QUIET_MS)) return;
       setConnected(false);
       void pollState();
-    }, 15_000);
+      attempt?.abort();
+    }, 5_000);
 
     // Mobile suspends the stream when backgrounded; re-check for a new build the
     // moment the app is foregrounded, so it never lingers on a stale bundle.
@@ -84,7 +94,7 @@ export function useSnapshot(): SnapshotState {
 
     return () => {
       stopped = true;
-      ac.abort();
+      attempt?.abort();
       clearInterval(watchdog);
       document.removeEventListener("visibilitychange", onVisible);
     };

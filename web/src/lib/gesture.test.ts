@@ -4,6 +4,7 @@ import {
   isCommitted,
   clampDrag,
   shouldComplete,
+  isNearBottom,
 } from "./gesture";
 
 describe("isHorizontalBack — rightward and mostly horizontal", () => {
@@ -42,3 +43,15 @@ describe("shouldComplete — release past 35% of width", () => {
     expect(shouldComplete(100, 0)).toBe(false); // guard against zero width
   });
 });
+
+describe("isNearBottom — stick-only-when-near-bottom", () => {
+  test("at the bottom is near", () => {
+    expect(isNearBottom(880, 1000, 120)).toBe(true); // 1000-(880+120)=0
+  });
+  test("within the threshold is near", () => {
+    expect(isNearBottom(800, 1000, 120)).toBe(true); // gap 80 <= 120
+  });
+  test("scrolled up past the threshold is NOT near (don't steal scroll)", () => {
+    expect(isNearBottom(200, 1000, 120)).toBe(false); // gap 680
+  });
+})

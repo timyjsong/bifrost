@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseTranscript } from "./transcript";
+import { parseTranscript, emptyParseState, reduceLines } from "./transcript";
 
 // Fixtures mirror the real transcript shape (verified against this repo's own
 // transcript): assistant turns are one JSONL line per content block sharing
@@ -78,5 +78,36 @@ describe("parseTranscript", () => {
     const { messages } = parseTranscript(lines, "s1");
     expect(messages).toHaveLength(1);
     expect(messages[0].blocks[0]).toEqual({ kind: "text", text: "kept" });
+  });
+});
+
+// ── incremental parse == full parse (the live-stream delta contract) ────────────
+describe("reduceLines — chunked parse equals a full parse", () => {
+  const full = [
+    L({ type: "user", uuid: "u1", message: { role: "user", content: "start" } }),
+    L({ type: "assistant", uuid: "a1", message: { id: "m1", role: "assistant", content: [{ type: "thinking", thinking: "hmm" }] } }),
+    L({ type: "assistant", uuid: "a1", message: { id: "m1", role: "assistant", content: [{ type: "text", text: "reply" }] } }),
+    L({ type: "assistant", uuid: "a1", message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } }),
+    L({ type: "user", uuid: "u2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }),
+    L({ type: "assistant", uuid: "a2", message: { id: "m2", role: "assistant", content: [{ type: "text", text: "done" }] } }),
+  ];
+
+  test("feeding lines one at a time yields the same messages as parsing all at once", () => {
+    const oneShot = parseTranscript(full, "s");
+    const st = emptyParseState();
+    for (const line of full) reduceLines(st, [line]);
+    expect(st.messages).toEqual(oneShot.messages);
+  });
+
+  test("a mid-turn split (open assistant id) still groups correctly", () => {
+    const st = emptyParseState();
+    reduceLines(st, full.slice(0, 2)); // user + first assistant block-line
+    expect(st.openAssistantId).toBe("m1");
+    reduceLines(st, full.slice(2, 4)); // two more block-lines of the SAME turn
+    // still one assistant message with 3 blocks
+    const assistant = st.messages.find((m) => m.uuid === "a1");
+    expect(assistant?.blocks.length).toBe(3);
+    reduceLines(st, full.slice(4)); // user result closes it, then a new turn
+    expect(parseTranscript(full, "s").messages).toEqual(st.messages);
   });
 });

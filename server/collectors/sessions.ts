@@ -12,6 +12,18 @@ import {
 } from "../derive";
 import { fullArgsForPid } from "../tasknames";
 import type { BifrostConfig } from "../config";
+import {
+  type IndexEntry,
+  boundedParse,
+  loadIndex,
+  nameFor,
+  rankDeadCandidates,
+  resolveDuplicate,
+  saveIndex,
+  slugFromCwd,
+} from "./sessionIndex";
+import { pinnedSessions } from "../sessions/pins";
+import { pinnedToRescue } from "../sessions/pinBypass";
 
 interface LivePidFile {
   pid: number;
@@ -67,12 +79,6 @@ interface TranscriptTail {
   lastPromptAt?: number;
 }
 
-interface FileStat {
-  path: string;
-  mtimeMs: number;
-  size: number;
-}
-
 interface TranscriptCacheEntry {
   mtimeMs: number;
   size: number;
@@ -82,11 +88,17 @@ interface TranscriptCacheEntry {
 
 const HEAD_BYTES = 256 * 1024;
 const TAIL_BYTES = 128 * 1024;
+// Cheap-pass header read: cwd + customTitle sit in the first JSONL lines, well
+// inside this — far smaller than the deep parse's HEAD_BYTES.
+const INDEX_HEAD_BYTES = 16 * 1024;
 const FULL_SWEEP_MS = 30_000;
 
-// sessionId -> latest known file stat. Rebuilt by the full sweep; live sessions'
+// sessionId -> materialized index entry {path, mtimeMs, size, slug, cwd, name}.
+// Seeded from the persisted index on boot, refreshed incrementally by the full
+// sweep (only new/mtime-changed files get a cheap header read); live sessions'
 // entries are re-stat'd every tick. Dead transcripts don't change between sweeps.
-let fileIndex = new Map<string, FileStat>();
+let fileIndex = new Map<string, IndexEntry>();
+let indexLoaded = false;
 let lastFullSweep = 0;
 
 const transcriptCache = new Map<string, TranscriptCacheEntry>();
@@ -237,32 +249,19 @@ async function scanFileForDefaults(path: string): Promise<DefaultEvent[]> {
   return out;
 }
 
-async function savedDefaultEvents(claudeDir: string, now: number): Promise<DefaultEvent[]> {
+/**
+ * Saved-default events, sourced from the materialized index instead of a second
+ * sequential stat-all walk (AC1.5). The full sweep has already collected
+ * `{path, mtimeMs}` for every non-agent transcript into `fileIndex`; reuse it
+ * (newest-first, stopping once no older file could carry a newer event). Each
+ * file's parsed events are mtime-cached, so only changed files are re-read.
+ */
+async function savedDefaultEvents(
+  files: { path: string; mtimeMs: number }[],
+  now: number,
+): Promise<DefaultEvent[]> {
   if (defaultCache && now - defaultCache.at < DEFAULT_TTL_MS) return defaultCache.events;
-  const projectsDir = join(claudeDir, "projects");
-  const files: { path: string; mtimeMs: number }[] = [];
-  try {
-    for (const slug of await readdir(projectsDir)) {
-      const dir = join(projectsDir, slug);
-      let names: string[];
-      try {
-        names = await readdir(dir);
-      } catch {
-        continue;
-      }
-      for (const n of names) {
-        if (!n.endsWith(".jsonl")) continue;
-        try {
-          files.push({ path: join(dir, n), mtimeMs: (await stat(join(dir, n))).mtimeMs });
-        } catch {
-          /* vanished */
-        }
-      }
-    }
-  } catch {
-    /* no projects dir */
-  }
-  files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  files = [...files].sort((a, b) => b.mtimeMs - a.mtimeMs);
   const events: DefaultEvent[] = [];
   let newestTs = 0;
   for (const f of files) {
@@ -533,9 +532,9 @@ export function parseTail(chunk: string): TranscriptTail {
   return tail;
 }
 
-/** Parse (or reuse cached parse of) a transcript, given an already-known stat. */
+/** Parse (or reuse cached parse of) a transcript, given an already-known index entry. */
 async function scanTranscript(
-  st: FileStat,
+  st: IndexEntry,
 ): Promise<TranscriptCacheEntry | null> {
   const cached = transcriptCache.get(st.path);
   if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
@@ -563,7 +562,30 @@ async function scanTranscript(
   return entry;
 }
 
-/** Re-index every transcript on disk. Stats run in parallel; called on the slow cadence. */
+/** Cheap index pass: read a small header chunk and extract `{cwd, name}` for the
+ *  persisted index. Returns null for sidechain/agent transcripts (excluded) or a
+ *  header that yielded no cwd/title. Far cheaper than the deep head+tail parse. */
+async function cheapIndexHead(
+  path: string,
+  sessionId: string,
+): Promise<{ cwd: string; name: string } | null> {
+  let head: TranscriptHead | null;
+  try {
+    head = parseHead(await readChunk(path, 0, INDEX_HEAD_BYTES), sessionId);
+  } catch {
+    return null; // file vanished mid-read
+  }
+  if (!head || head.sidechain) return null;
+  const cwd = head.cwd ?? "";
+  return { cwd, name: nameFor(head.customTitle, cwd) };
+}
+
+/**
+ * Re-index every transcript on disk (slow cadence). Stat-only ranking, then a
+ * cheap header read ONLY for files new or mtime-changed since the last sweep —
+ * a warm start re-reads nothing unchanged (AC1.3). Two transcripts sharing a
+ * sessionId across slug dirs resolve deterministically with one warning (AC1.4).
+ */
 async function fullSweep(claudeDir: string): Promise<void> {
   const projectsDir = join(claudeDir, "projects");
   let slugs: string[] = [];
@@ -586,13 +608,17 @@ async function fullSweep(claudeDir: string): Promise<void> {
       }
     }),
   );
-  const next = new Map<string, FileStat>();
+  // Stat-only ranking pass (no parse), in parallel.
+  const stats: { path: string; slug: string; sessionId: string; mtimeMs: number; size: number }[] =
+    [];
   await Promise.all(
     paths.map(async (path) => {
       try {
         const st = await stat(path);
-        next.set(basename(path, ".jsonl"), {
+        stats.push({
           path,
+          slug: basename(dirname(path)),
+          sessionId: basename(path, ".jsonl"),
           mtimeMs: st.mtimeMs,
           size: st.size,
         });
@@ -601,11 +627,68 @@ async function fullSweep(claudeDir: string): Promise<void> {
       }
     }),
   );
+
+  // Resolve duplicate sessionIds across slug dirs deterministically (AC1.4),
+  // warning once per collision so the list never flickers across sweeps.
+  const next = new Map<string, IndexEntry>();
+  const collided = new Set<string>();
+  await Promise.all(
+    stats.map(async (s) => {
+      const prev = fileIndex.get(s.sessionId);
+      // Reuse the cached cwd/name when the same path is unchanged; otherwise
+      // (new file, grown file, or moved across slugs) do the cheap header read.
+      let cwd: string;
+      let name: string;
+      if (prev && prev.path === s.path && prev.mtimeMs === s.mtimeMs) {
+        cwd = prev.cwd;
+        name = prev.name;
+      } else {
+        const cheap = await cheapIndexHead(s.path, s.sessionId);
+        if (!cheap) return; // sidechain / vanished — not indexed
+        cwd = cheap.cwd;
+        name = cheap.name;
+      }
+      const entry: IndexEntry = {
+        sessionId: s.sessionId,
+        path: s.path,
+        slug: s.slug,
+        mtimeMs: s.mtimeMs,
+        size: s.size,
+        cwd,
+        name,
+      };
+      const existing = next.get(s.sessionId);
+      if (!existing) {
+        next.set(s.sessionId, entry);
+      } else {
+        collided.add(s.sessionId);
+        next.set(s.sessionId, resolveDuplicate(existing, entry));
+      }
+    }),
+  );
+  for (const sessionId of collided) {
+    const winner = next.get(sessionId);
+    const losers = stats.filter(
+      (s) => s.sessionId === sessionId && s.path !== winner?.path,
+    );
+    console.warn(
+      `[bifrost] duplicate sessionId ${sessionId} across slug dirs — using ${winner?.path}; ignoring ${losers
+        .map((l) => l.path)
+        .join(", ")}`,
+    );
+  }
+
   fileIndex = next;
   // Drop parse-cache entries for files that no longer exist.
   const livePaths = new Set([...next.values()].map((f) => f.path));
   for (const path of transcriptCache.keys()) {
     if (!livePaths.has(path)) transcriptCache.delete(path);
+  }
+  // Persist the refreshed index so a warm start reloads it (AC1.3).
+  try {
+    await saveIndex(fileIndex);
+  } catch {
+    // best-effort cache; the next sweep rebuilds it
   }
 }
 
@@ -672,6 +755,17 @@ export async function collectSessions(
     if (lp.cwd === scratch || lp.cwd.startsWith(scratch + "/")) live.delete(sid);
   }
 
+  // Warm start: reload the persisted index so unchanged files aren't re-parsed
+  // before the first sweep runs (AC1.3).
+  if (!indexLoaded) {
+    indexLoaded = true;
+    try {
+      fileIndex = await loadIndex();
+    } catch {
+      // no persisted index yet — the first sweep builds it
+    }
+  }
+
   const now = Date.now();
   if (now - lastFullSweep > FULL_SWEEP_MS) {
     await fullSweep(cfg.claudeDir);
@@ -688,12 +782,22 @@ export async function collectSessions(
         join(
           cfg.claudeDir,
           "projects",
-          lp.cwd.replace(/[/.]/g, "-"),
+          slugFromCwd(lp.cwd),
           `${lp.sessionId}.jsonl`,
         );
       try {
         const st = await stat(path);
-        fileIndex.set(lp.sessionId, { path, mtimeMs: st.mtimeMs, size: st.size });
+        fileIndex.set(lp.sessionId, {
+          sessionId: lp.sessionId,
+          path,
+          slug: basename(dirname(path)),
+          mtimeMs: st.mtimeMs,
+          size: st.size,
+          // keep the indexed cwd/name; fall back to the live cwd for a session
+          // not yet in the index (cheap pass hasn't seen it).
+          cwd: known?.cwd ?? lp.cwd,
+          name: known?.name ?? nameFor(undefined, lp.cwd),
+        });
       } catch {
         // transcript not on disk yet
       }
@@ -701,18 +805,24 @@ export async function collectSessions(
   );
 
   const cutoff = now - cfg.sessions.historyDays * 86_400_000;
-  const out: SessionInfo[] = [];
+  const pinned = await pinnedSessions();
   const seen = new Set<string>();
   const signals = new Map<string, SessionSignals>();
-  const defaultEvents = await savedDefaultEvents(cfg.claudeDir, now);
+  const defaultEvents = await savedDefaultEvents(
+    [...fileIndex.values()].map((e) => ({ path: e.path, mtimeMs: e.mtimeMs })),
+    now,
+  );
 
-  for (const [sessionId, fs] of fileIndex) {
+  // Build a SessionInfo from a deep-parsed transcript. Shared by the live and
+  // bounded-dead passes; returns null when the entry is unparseable, a
+  // sidechain, or a scratch-cwd Bifrost session (excluded everywhere).
+  const buildRow = async (fs: IndexEntry): Promise<SessionInfo | null> => {
+    const sessionId = fs.sessionId;
     const lp = live.get(sessionId);
-    if (!lp && fs.mtimeMs < cutoff) continue;
     const entry = await scanTranscript(fs);
-    if (!entry || !entry.head || entry.head.sidechain) continue;
+    if (!entry || !entry.head || entry.head.sidechain) return null;
     const cwd = lp?.cwd ?? entry.head.cwd ?? "";
-    if (cwd === scratch || cwd.startsWith(scratch + "/")) continue;
+    if (cwd === scratch || cwd.startsWith(scratch + "/")) return null;
     seen.add(sessionId);
     const seenTitle = entry.tail.customTitle ?? entry.head?.customTitle;
     if (seenTitle) titleBySession.set(sessionId, seenTitle);
@@ -736,13 +846,11 @@ export async function collectSessions(
         callIndex: callIndexBySession.get(sessionId),
         cpuQuietMs: lp.cpuQuietMs,
         pidStatus: lp.status,
-        pidStatusAgeMs: lp.statusUpdatedAt
-          ? now - lp.statusUpdatedAt
-          : undefined,
+        pidStatusAgeMs: lp.statusUpdatedAt ? now - lp.statusUpdatedAt : undefined,
         kind: lp.kind,
       });
     }
-    out.push({
+    return {
       sessionId,
       pid: lp?.pid,
       live: !!lp,
@@ -764,8 +872,29 @@ export async function collectSessions(
       transcriptBytes: fs.size,
       nowDoing: lp ? entry.tail.nowDoing : undefined,
       lastPromptAt: lp ? entry.tail.lastPromptAt : undefined,
-    });
+    };
+  };
+
+  // Always deep-parse live sessions.
+  const liveRowsRaw: SessionInfo[] = [];
+  for (const sessionId of live.keys()) {
+    const fs = fileIndex.get(sessionId);
+    if (!fs) continue;
+    const row = await buildRow(fs);
+    if (row) liveRowsRaw.push(row);
   }
+
+  // Dead candidates: ranked newest-first, parsed only until `maxHistory`
+  // eligible interactive rows accumulate (AC1.1) — not the whole pile.
+  const ranked = rankDeadCandidates(fileIndex.values(), new Set(live.keys()), cutoff);
+  const { rows: deadRows } = await boundedParse(
+    ranked,
+    cfg.sessions.maxHistory,
+    buildRow,
+    (row) => !row.headless,
+  );
+
+  const out: SessionInfo[] = [...liveRowsRaw, ...deadRows];
 
   // Live sessions whose transcript we didn't find still deserve a row.
   for (const [sessionId, lp] of live) {
@@ -793,15 +922,14 @@ export async function collectSessions(
     });
   }
 
-  out.sort((a, b) => {
-    if (a.live !== b.live) return a.live ? -1 : 1;
-    return b.lastActivityAt - a.lastActivityAt;
-  });
-
-  const liveRows = out.filter((s) => s.live);
+  const liveRows = out
+    .filter((s) => s.live)
+    .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   // Interactive history gets the cap; headless corpses only fill what's left,
   // so probe swarms can't bury real sessions.
-  const dead = out.filter((s) => !s.live);
+  const dead = out
+    .filter((s) => !s.live)
+    .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
   const deadInteractive = dead
     .filter((s) => !s.headless)
     .slice(0, cfg.sessions.maxHistory);
@@ -811,6 +939,32 @@ export async function collectSessions(
   const history = [...deadInteractive, ...deadHeadless].sort(
     (a, b) => b.lastActivityAt - a.lastActivityAt,
   );
+  // Pin rescue (AC2.3 / red-team M1): a pinned session must render even when a
+  // cutoff dropped it — older than historyDays (never ranked into the bounded
+  // parse) OR sliced off past maxHistory. Pull the pinned-but-absent ids back
+  // from the full uncapped index and deep-parse them now (a tiny set — the pin
+  // count, not the pile). Bypasses BOTH cutoffs by consulting neither.
+  const boundedIds = new Set([
+    ...liveRows.map((s) => s.sessionId),
+    ...history.map((s) => s.sessionId),
+  ]);
+  const rescued: SessionInfo[] = [];
+  for (const e of pinnedToRescue(
+    fileIndex.values(),
+    pinned,
+    boundedIds,
+    new Set(live.keys()),
+  )) {
+    const row = await buildRow(e);
+    if (row) rescued.push(row);
+  }
+  const historyWithPins = [...history, ...rescued].sort(
+    (a, b) => b.lastActivityAt - a.lastActivityAt,
+  );
+  // Stamp the Bifrost-owned pin flag onto every row the dashboard will show.
+  for (const s of [...liveRows, ...historyWithPins]) {
+    if (pinned.has(s.sessionId)) s.pinned = true;
+  }
   // Naming state only matters while a session lives; titles stay sticky
   // for any transcript still indexed.
   for (const sid of callIndexBySession.keys()) {
@@ -831,7 +985,7 @@ export async function collectSessions(
   }
   const livePids = new Map<string, number>();
   for (const [sid, lp] of live) livePids.set(sid, lp.pid);
-  return { sessions: [...liveRows, ...history], signals, livePids };
+  return { sessions: [...liveRows, ...historyWithPins], signals, livePids };
 }
 
 /** Transcript path for a known session id, if indexed. */
@@ -842,4 +996,33 @@ export function transcriptPathFor(sessionId: string): string | undefined {
 /** Latest known mtime for a session's transcript. */
 export function transcriptMtimeFor(sessionId: string): number | undefined {
   return fileIndex.get(sessionId)?.mtimeMs;
+}
+
+/**
+ * The full *uncapped* session index as `SessionIndexEntry` rows (story 2-2,
+ * AC2.2). The dashboard snapshot is capped at `maxHistory`; the name-search box
+ * needs the whole pile, so this ships once and the matcher runs client-side per
+ * keystroke (no network round-trip). `liveIds` (the current live set from the
+ * snapshot) marks which rows are tmux-resident — a live row routes to the drive
+ * view rather than a view-only open. Only the fields a name search + a
+ * click-through need; never the deep-parsed transcript.
+ */
+export function sessionIndexEntries(
+  liveIds: ReadonlySet<string>,
+): import("../../shared/types").SessionIndexEntry[] {
+  const out: import("../../shared/types").SessionIndexEntry[] = [];
+  for (const e of fileIndex.values()) {
+    // `e.name` is already `customTitle ?? basename(cwd)` (story 2-1 AC1.2). Ship
+    // it as `customTitle` so the client matcher (`sessionName`) reads the same
+    // searchable name; when the session was never renamed it equals basename(cwd)
+    // and the match is identical either way.
+    out.push({
+      sessionId: e.sessionId,
+      cwd: e.cwd,
+      customTitle: e.name || undefined,
+      mtimeMs: e.mtimeMs,
+      live: liveIds.has(e.sessionId),
+    });
+  }
+  return out;
 }

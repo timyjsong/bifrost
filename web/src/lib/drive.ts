@@ -1,5 +1,6 @@
 import { apiFetch } from "./api";
 import type { PaneState, PermissionMode, SlashCommand } from "../../../shared/types";
+import { classifySlash } from "./slashPanels";
 
 /**
  * The gate for whether a session can be driven at all (AC3.5). Pure, so the
@@ -41,6 +42,26 @@ export interface SendResult {
 export interface ScheduleResult extends SendResult {
   /** Grace period (ms) the server parked the send for — the UI's countdown. */
   delayMs?: number;
+  /** The POST threw (network drop) instead of returning an HTTP status, so the
+   *  server may have parked the send even though the client saw an error. */
+  indeterminate?: boolean;
+}
+
+export type SendOutcome = "parked" | "rejected" | "indeterminate";
+
+/**
+ * How the submit UI should treat a schedulePrompt result:
+ * - `parked` — accepted; ride the grace window.
+ * - `rejected` — the server refused it (409 / other HTTP error); it definitely
+ *   did NOT park, so it's safe to restore the user's text.
+ * - `indeterminate` — the request threw before any status came back; the server
+ *   MAY have parked it and will fire, so the text must NOT be auto-restored (a
+ *   blind resend would double-send). Reconciles via `pane.pendingSend` / the
+ *   transcript instead.
+ */
+export function sendOutcome(res: ScheduleResult): SendOutcome {
+  if (res.ok) return "parked";
+  return res.indeterminate ? "indeterminate" : "rejected";
 }
 
 /**
@@ -62,7 +83,7 @@ export async function schedulePrompt(sessionId: string, text: string): Promise<S
     const j = (await r.json().catch(() => ({}))) as { reason?: string };
     return { ok: false, reason: j.reason ?? `http ${r.status}` };
   } catch (e) {
-    return { ok: false, reason: (e as Error).message };
+    return { ok: false, indeterminate: true, reason: (e as Error).message };
   }
 }
 
@@ -186,25 +207,55 @@ export function filterSlash(input: string, commands: SlashCommand[]): SlashComma
     .slice(0, 8);
 }
 
-export async function getDraft(sessionId: string): Promise<string> {
+export type SendFailure = { at: number; reason: string };
+
+export type DraftState = { text: string; sendFailure: SendFailure | null };
+
+export async function getDraft(sessionId: string): Promise<DraftState> {
   try {
     const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/draft`);
-    if (!r.ok) return "";
-    return ((await r.json()) as { text?: string }).text ?? "";
+    if (!r.ok) return { text: "", sendFailure: null };
+    const body = (await r.json()) as { text?: string; sendFailure?: SendFailure | null };
+    return { text: body.text ?? "", sendFailure: body.sendFailure ?? null };
   } catch {
-    return "";
+    return { text: "", sendFailure: null };
   }
 }
 
-export async function saveDraft(sessionId: string, text: string): Promise<void> {
+/**
+ * One line for the failure strip when a parked send failed at fire time (the
+ * strip itself prefixes "send failed:"). The server keeps the unsent text in
+ * the session's draft — it fills the composer again as soon as the session is
+ * sendable (including after a resume).
+ */
+export function sendFailureMessage(reason: string): string {
+  switch (reason) {
+    case "session-gone":
+    case "not-injectable":
+      return "the session wasn't running when the timer fired — your text is kept in the draft";
+    case "send-error":
+      return "the message couldn't be injected — your text is kept in the draft";
+    default:
+      return "the parked send didn't land — your text is kept in the draft";
+  }
+}
+
+/**
+ * PUT the draft. Returns whether the server accepted it — the caller advances
+ * its sync baseline ONLY on success, so a failed PUT doesn't move the baseline
+ * ahead of what the server actually holds (which would make the receive-poll
+ * adopt the stale server value over newer local text — audit M1/J6).
+ */
+export async function saveDraft(sessionId: string, text: string): Promise<boolean> {
   try {
-    await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/draft`, {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/draft`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ text }),
     });
+    return r.ok;
   } catch {
-    /* draft save is best-effort — losing one keystroke's sync is harmless */
+    return false; // best-effort — the baseline stays put, local text is preserved
   }
 }
 
@@ -272,4 +323,211 @@ export async function uploadFiles(
   } catch {
     return [];
   }
+}
+
+// ── rewind (checkpoints) ───────────────────────────────────────────────────────
+
+export interface RewindCheckpoint {
+  label: string;
+  detail: string;
+}
+
+export type RewindOpenResult =
+  | { ok: true; checkpoints: RewindCheckpoint[]; cursorIndex: number }
+  | { ok: false; reason: string };
+
+export async function rewindOpen(sessionId: string): Promise<RewindOpenResult> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/rewind/open`, {
+      method: "POST",
+    });
+    return (await r.json()) as RewindOpenResult;
+  } catch {
+    return { ok: false, reason: "network" };
+  }
+}
+
+/** A picker commit outcome. `reason: "gone"` means the choice is no longer
+ *  offered by the live picker (the list shifted since the peek). */
+export interface SelectResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/** Commit a rewind by the checkpoint's IDENTITY (label + detail), not the
+ *  peek-time index — the checkpoint list can grow between peek and commit, and
+ *  restoring to the wrong point is destructive. */
+export async function rewindSelect(
+  sessionId: string,
+  choice: { label: string; detail: string },
+): Promise<SelectResult> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/rewind/select`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(choice),
+    });
+    return (await r.json()) as SelectResult;
+  } catch {
+    return { ok: false, reason: "network" };
+  }
+}
+
+export async function rewindCancel(sessionId: string): Promise<void> {
+  try {
+    await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/rewind/cancel`, {
+      method: "POST",
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+// ── model switching (session-scoped) ──────────────────────────────────────────
+
+export interface ModelOption {
+  label: string;
+  detail: string;
+  current: boolean;
+}
+
+export type ModelOpenResult =
+  | { ok: true; options: ModelOption[]; cursorIndex: number }
+  | { ok: false; reason: string };
+
+export async function modelOpen(sessionId: string): Promise<ModelOpenResult> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/model/open`, {
+      method: "POST",
+    });
+    return (await r.json()) as ModelOpenResult;
+  } catch {
+    return { ok: false, reason: "network" };
+  }
+}
+
+/** Commit a model by its row LABEL (not the peek-time index). */
+export async function modelSelect(sessionId: string, label: string): Promise<SelectResult> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/model/select`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
+    return (await r.json()) as SelectResult;
+  } catch {
+    return { ok: false, reason: "network" };
+  }
+}
+
+export async function modelCancel(sessionId: string): Promise<void> {
+  try {
+    await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/model/cancel`, {
+      method: "POST",
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+// ── effort switching (session-scoped) ─────────────────────────────────────────
+
+export type EffortOpenResult =
+  | { ok: true; options: string[]; currentIndex: number }
+  | { ok: false; reason: string };
+
+export async function effortOpen(sessionId: string): Promise<EffortOpenResult> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/effort/open`, {
+      method: "POST",
+    });
+    return (await r.json()) as EffortOpenResult;
+  } catch {
+    return { ok: false, reason: "network" };
+  }
+}
+
+/** Commit an effort by its stop LABEL (not the peek-time index). */
+export async function effortSelect(sessionId: string, value: string): Promise<SelectResult> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/effort/select`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    return (await r.json()) as SelectResult;
+  } catch {
+    return { ok: false, reason: "network" };
+  }
+}
+
+export async function effortCancel(sessionId: string): Promise<void> {
+  try {
+    await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/effort/cancel`, {
+      method: "POST",
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/** UI copy for a picker-open OR commit failure (rewind / model / effort).
+ *  "attached-small" and "busy" and "gone" have specific, actionable causes; the
+ *  rest fall back to the version-changed guidance. */
+export function menuFailureMessage(reason: string, what: string): string {
+  if (reason === "attached-small") {
+    return `couldn't read the ${what} — a terminal is attached to this session at a small window size; detach or enlarge it and retry, or use the raw terminal`;
+  }
+  if (reason === "busy") {
+    return `the session is mid-turn — wait for it to finish, then reopen the ${what}`;
+  }
+  if (reason === "gone") {
+    return `that choice is no longer available — the ${what} changed since you opened it; reopen and pick again`;
+  }
+  return `couldn't read the ${what} — this Claude Code version may have changed it; use the raw terminal`;
+}
+
+/**
+ * Composer guard. THE RULE (my call, 2026-07-02): a slash command that opens an
+ * interactive TUI panel can't work through the chat — those get a Bifrost UI
+ * control instead, or a pointer to the raw terminal; a few would end/disrupt
+ * the session and are refused. Classification is single-sourced in
+ * ./slashPanels. Returns the hint to show, or null to let the text through.
+ */
+export function interceptComposer(text: string): string | null {
+  const m = text.trim().match(/^(\/[a-z-]+)(?:\s|$)/i);
+  if (!m) return null;
+  return classifySlash(m[1])?.hint ?? null;
+}
+
+// ── session diff (review spine) ────────────────────────────────────────────────
+
+export interface DiffStat {
+  files: number;
+  insertions: number;
+  deletions: number;
+}
+
+export type SessionDiffState =
+  | { git: false }
+  | { git: true; stat: DiffStat; diff: string; truncated: boolean };
+
+export async function getSessionDiff(sessionId: string): Promise<SessionDiffState> {
+  try {
+    const r = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}/diff`);
+    if (!r.ok) return { git: false };
+    return (await r.json()) as SessionDiffState;
+  } catch {
+    return { git: false };
+  }
+}
+
+/** Row class for a unified-diff line — pure so the render rule is tested. */
+export function diffLineKind(line: string): "add" | "del" | "hunk" | "meta" | "ctx" {
+  if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff --git") || line.startsWith("index "))
+    return "meta";
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  return "ctx";
 }

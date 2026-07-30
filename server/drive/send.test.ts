@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { sendText, sendKey } from "./send";
+import { sendText, sendKey, viewportVerdict, MENU_COLS, MENU_ROWS } from "./send";
 
 // Integration test against a THROWAWAY tmux session (never a live work session).
 // Skipped where tmux isn't available so the suite still runs in bare CI.
@@ -80,5 +80,21 @@ d("send executor (throwaway tmux session)", () => {
     expect(pane).toContain("echo NEWLINE");
     // the smoking-gun concatenation the bug produced must never appear
     expect(pane).not.toContain("OLDLINEecho");
+  });
+});
+
+describe("viewportVerdict — tall pickers need the spawn-size window", () => {
+  test("full-size window is fine, attached or not", () => {
+    expect(viewportVerdict(0, MENU_COLS, MENU_ROWS)).toBe("ok");
+    expect(viewportVerdict(2, 240, 60)).toBe("ok");
+  });
+
+  test("a small UNATTACHED window may be resized back", () => {
+    expect(viewportVerdict(0, 120, 30)).toBe("resize");
+    expect(viewportVerdict(0, 220, 30)).toBe("resize");
+  });
+
+  test("a small ATTACHED window is left alone (fail honestly, never fight a live terminal)", () => {
+    expect(viewportVerdict(1, 120, 30)).toBe("attached-small");
   });
 });

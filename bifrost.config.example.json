@@ -1,14 +1,21 @@
 {
-  "bind": { "host": "100.100.100.100", "port": 4444 },
+  "bind": { "host": "127.0.0.1", "port": 4444 },
   "realms": [
     { "name": "projects", "path": "~/projects" },
     { "name": "work", "path": "~/work" }
   ],
   "claudeDir": "~/.claude",
+  "claudeBin": "~/.local/bin/claude",
+  "alerts": {
+    "watchedUnits": ["ssh", "tailscaled"],
+    "limitsUnit": null,
+    "vapidSubject": "mailto:you@example.com"
+  },
+  "lifecycle": { "enabled": false, "idleParkMs": 86400000, "maxKillsPerSweep": 2 },
   "refresh": { "fastMs": 3000, "slowMs": 30000 },
   "sessions": { "historyDays": 14, "maxHistory": 60 },
   "summarize": {
-    "claudeBin": "/home/you/.local/bin/claude",
+    "claudeBin": "~/.local/bin/claude",
     "model": "sonnet",
     "effort": "low",
     "fastStartArgs": ["--strict-mcp-config"],
@@ -22,8 +29,8 @@
     "timeoutMs": 120000
   },
   "auth": {
-    "origins": ["http://100.100.100.100:4444", "https://your-host.your-tailnet.ts.net:8444"],
-    "hosts": ["100.100.100.100:4444", "your-host.your-tailnet.ts.net:8444"],
+    "origins": ["http://127.0.0.1:4444", "https://your-host.your-tailnet.ts.net:8444"],
+    "hosts": ["127.0.0.1:4444", "your-host.your-tailnet.ts.net:8444"],
     "enrollUrl": "https://your-host.your-tailnet.ts.net:8444"
   }
 }

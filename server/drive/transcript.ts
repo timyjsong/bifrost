@@ -82,16 +82,27 @@ function toBlocks(content: unknown): ContentBlock[] {
 }
 
 /**
- * Parse raw transcript lines (file order = chronological) into the normalized
- * state. Consecutive assistant lines sharing `message.id` collapse into one turn.
+ * Incremental parse state — retained across appends so the live stream can feed
+ * only NEW lines instead of re-parsing the whole file each tick (perf: a
+ * multi-MB transcript under steady output). `openAssistantId` is the message.id
+ * of the turn still open to more block-lines.
  */
-export function parseTranscript(
-  lines: string[],
-  sessionId: string,
-): InteractionState {
-  const messages: InteractionMessage[] = [];
-  let openAssistantId: string | null = null; // message.id of the turn we're appending to
+export interface ParseState {
+  messages: InteractionMessage[];
+  openAssistantId: string | null;
+}
 
+export function emptyParseState(): ParseState {
+  return { messages: [], openAssistantId: null };
+}
+
+/**
+ * Reduce more transcript lines into an existing parse state, in place. Because
+ * the transcript is append-only and a turn's block-lines are contiguous, feeding
+ * new lines onto retained state is identical to a full re-parse — the last
+ * message may grow (same message.id) or new messages append.
+ */
+export function reduceLines(state: ParseState, lines: string[]): void {
   for (const line of lines) {
     if (!line.trim()) continue;
     let e: RawEntry;
@@ -106,25 +117,25 @@ export function parseTranscript(
       const blocks = toBlocks(e.message.content);
       if (!blocks.length) continue;
       const id = e.message.id ?? null;
-      const last = messages[messages.length - 1];
-      if (id && id === openAssistantId && last && last.role === "assistant") {
+      const last = state.messages[state.messages.length - 1];
+      if (id && id === state.openAssistantId && last && last.role === "assistant") {
         last.blocks.push(...blocks); // another block-line of the same turn
       } else {
-        messages.push({
+        state.messages.push({
           uuid: e.uuid ?? "",
           role: "assistant",
           isSidechain: !!e.isSidechain,
           blocks,
           ts,
         });
-        openAssistantId = id;
+        state.openAssistantId = id;
       }
     } else if (e.type === "user" && e.message) {
-      openAssistantId = null; // a user line ends any open assistant turn
+      state.openAssistantId = null; // a user line ends any open assistant turn
       if (e.isMeta) continue; // injected reminders / local-command output — not conversation
       const blocks = toBlocks(e.message.content);
       if (!blocks.length) continue;
-      messages.push({
+      state.messages.push({
         uuid: e.uuid ?? "",
         role: "user",
         isSidechain: !!e.isSidechain,
@@ -136,6 +147,17 @@ export function parseTranscript(
     // last-prompt / queue-operation / file-history-snapshot) is not conversation
     // content for Build 1; leave any open assistant turn intact.
   }
+}
 
-  return { sessionId, messages };
+/**
+ * Parse raw transcript lines (file order = chronological) into the normalized
+ * state. Consecutive assistant lines sharing `message.id` collapse into one turn.
+ */
+export function parseTranscript(
+  lines: string[],
+  sessionId: string,
+): InteractionState {
+  const state = emptyParseState();
+  reduceLines(state, lines);
+  return { sessionId, messages: state.messages };
 }

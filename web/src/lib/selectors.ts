@@ -38,6 +38,16 @@ export function splitColumns<T>(list: T[], cols: number): T[][] {
   return out;
 }
 
+/**
+ * Whether session alerts fire for this session. Mirrors the server's per-card
+ * mute contract (`server/index.ts` / `alerts/readings.ts`): the flag is absent
+ * by default and only an explicit `false` mutes — so undefined reads as on.
+ * Single-sourced here so every view's mute toggle agrees.
+ */
+export function sessionAlertsEnabled(s: SessionInfo): boolean {
+  return s.alertsEnabled !== false;
+}
+
 export type QueueStatus = "queued" | "active" | undefined;
 
 export function queueStatusOf(

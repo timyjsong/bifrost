@@ -49,3 +49,11 @@ export function basename(path: string): string {
 export function tildify(path: string): string {
   return path.replace(/^\/home\/[^/]+/, "~");
 }
+
+/**
+ * Truncate to at most `n` characters, spending the last one on an ellipsis so
+ * the result never exceeds the budget. Used to cap tool output in the transcript.
+ */
+export function clip(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}

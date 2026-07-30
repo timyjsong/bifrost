@@ -1,5 +1,10 @@
 import { test, expect } from "bun:test";
-import { decide, isSecureRequest, type GuardInput } from "./guard";
+import {
+  decide,
+  isSecureRequest,
+  secureHostFrom,
+  type GuardInput,
+} from "./guard";
 
 const allow = {
   allowedHosts: ["100.100.100.100:4444", "dev.your-tailnet.ts.net:8444"],
@@ -99,6 +104,24 @@ test("isSecureRequest: true on https proto or a matching secure Host, else false
   expect(isSecureRequest(null, "100.100.100.100:4444", sh)).toBe(false); // raw http host
   expect(isSecureRequest(null, null, sh)).toBe(false); // no host
   expect(isSecureRequest(null, "anything", "")).toBe(false); // secureHost unconfigured
+});
+
+// HSTS is only honest on a route that really is HTTPS. The enroll URL is the
+// only place the secure Host comes from, so a non-HTTPS one must designate
+// nothing — otherwise a plaintext response carries a strict-transport promise.
+test("secureHostFrom accepts only an https enroll URL", () => {
+  expect(secureHostFrom("https://dev.your-tailnet.ts.net:8444")).toBe(
+    "dev.your-tailnet.ts.net:8444",
+  );
+  expect(secureHostFrom("http://dev.your-tailnet.ts.net:8444")).toBe("");
+  expect(secureHostFrom("http://127.0.0.1:4455")).toBe("");
+  expect(secureHostFrom("")).toBe("");
+  expect(secureHostFrom("not a url")).toBe("");
+});
+
+test("a plaintext enroll URL cannot make its own host secure", () => {
+  const sh = secureHostFrom("http://127.0.0.1:4455");
+  expect(isSecureRequest(null, "127.0.0.1:4455", sh)).toBe(false);
 });
 
 test("empty allowlists fail closed — every api call denied", () => {

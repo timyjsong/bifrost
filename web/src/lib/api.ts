@@ -87,11 +87,16 @@ export async function* sseStream(
       buf = buf.slice(i + 2);
       let event = "message";
       let data = "";
+      let comment = false;
       for (const line of frame.split("\n")) {
         if (line.startsWith("event:")) event = line.slice(6).trim();
         else if (line.startsWith("data:")) data += line.slice(5).trim();
+        else if (line.startsWith(":")) comment = true;
       }
+      // Comment frames are the server's heartbeat — surface them as pings so
+      // consumers can tell a quiet-but-alive stream from a hung one.
       if (data) yield { event, data };
+      else if (comment) yield { event: "ping", data: "" };
     }
   }
 }
