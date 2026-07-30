@@ -28,7 +28,7 @@ I built it because I was driving Claude Code by sshing into a box and reattachin
 
 **Projects and files.** Project cards show branch, dirty state, and recent activity for each configured directory. A read-only file browser confines every request to a project root via realpath — path traversal and symlink escapes resolve outside the root and are rejected.
 
-**Auth.** Enrollment is a QR code carrying a single-use, time-limited code, minted from a CLI on the box. Devices trade it for a 256-bit token checked in constant time. Guessing is throttled per IP. Host and origin allowlists block DNS-rebinding and CSRF, every response carries a CSP, and revoking a device takes effect immediately, including for open SSE streams.
+**Auth.** Enrollment is a QR code carrying a single-use, time-limited code, minted from a CLI on the box. Devices trade it for a 256-bit token checked in constant time. Guessing is throttled per IP. Host and origin allowlists block DNS-rebinding and CSRF, and every response carries a CSP. Revoking a device blocks its next request immediately; an SSE stream it already has open is cut on the following heartbeat, so worst case it sees another 25 seconds of events.
 
 ## Design constraints
 
@@ -67,11 +67,13 @@ deploy/bifrost.service systemd unit
 
 ## Tests
 
-`bun run check` runs the unit suite plus server and web typechecks; CI runs it on every push, so the badge above is the current answer rather than a number in a README. At the time of writing it is 759 tests across 75 files.
+`bun run check` runs the unit suite plus server and web typechecks; CI runs it on every push, so the badge above is the current answer rather than a number in a README. At the time of writing it is 761 tests across 75 files.
 
 The tests cover the logic layer: transcript parsing, state derivation, process attribution, tmux target validation, menu parsing, spawn confinement and the resume liveness gate, picker option matching, the summarize queue, auth, window resolution, filters, and view models. They are written from the requirement, not the implementation — a failing test means the behavior changed, not that the test needs updating.
 
-Coverage is uneven, and the distribution is worth stating rather than hiding behind the total. `bun test --coverage` reports about 90% of lines overall: `server/auth/*`, `server/derive.ts`, the `spawn/` lifecycle modules and the web `lib/` modules sit at or near 100%, while `server/collectors/sessions.ts` — the largest file, and the one behind the transcript-plus-`/proc` claim — is around 53%. `server/index.ts` has no route tests and there are no component tests at all; the HTTP layer is verified by hand and presentation by eye.
+Coverage is uneven, and the distribution is worth stating rather than hiding behind the total. `bun test --coverage` reports about 90% of lines overall, but it is concentrated where the security and correctness decisions live: `server/auth/guard.ts` and `tokens.ts`, `server/derive.ts`, `server/files/confine.ts`, `server/spawn/{spawn,originate,resume,restart}.ts` and the pure web view-models (`selectors`, `cardModel`, `format`, `keymap`) are at or near 100%.
+
+It thins out fast outside that: `server/collectors/sessions.ts` — the largest file, and the one behind the transcript-plus-`/proc` claim — is around 53%, `server/spawn/memgate.ts` 75%, and on the web side the modules that are mostly network plumbing are barely covered at all (`web/src/lib/drive.ts` 33%, `push.ts` 27%, `api.ts` 3%). `server/index.ts` has no route tests and there are no component tests; the HTTP layer is verified by hand and presentation by eye. Route tests over the spawn and picker endpoints are the obvious next thing to write.
 
 ## Requirements
 
@@ -115,9 +117,11 @@ Server code changes need a service restart. Frontend changes only need `cd web &
 
 ## How it was built
 
-I specced each build before it was written, agreed the acceptance criteria up front, then let the implementation run autonomously in Claude Code sessions and reviewed the result until it converged. Every cycle ships contract tests for the logic it added. The commit history is the build log, and the specs themselves are in [`phases/`](phases/) — including what was considered and rejected, and where a spec guessed wrong and the live system corrected it.
+I specced each build before it was written, agreed the acceptance criteria up front, then let the implementation run autonomously in Claude Code sessions and reviewed the result until it converged. Every cycle ships contract tests for the logic it added. The specs are in [`phases/`](phases/), including what was considered and rejected.
 
-The code was written in Claude Code sessions and every commit carries a co-author trailer to say so. What this repository evidences, then, is the part I actually did: deciding what to build, specifying the contracts, red-teaming the designs before they were built, and reviewing what came back. The security and concurrency decisions documented in `phases/` and in the module headers are the substance of it.
+The code was written in Claude Code sessions and every commit carries a co-author trailer to say so. What this repository evidences, then, is the part I actually did: deciding what to build, specifying the contracts, red-teaming the designs before they were built, and reviewing what came back. The security and concurrency decisions in `phases/` and in the module headers are the substance of it.
+
+**How this history relates to the real one.** Bifrost is developed in a private repository and published here as a filtered extraction: internal working notes, a build-state log, ticket files and audit write-ups are excluded, and machine identifiers are replaced with placeholders. Two consequences are visible from the outside and worth naming rather than leaving you to trip over them. A few early commit messages mention files you won't find in their diffs, because those files were filtered out of the published history. And Build 2 lands as one large commit instead of the per-milestone series Builds 0 and 1 got — it was extracted in a single pass, not written in one sitting, and its design doc predates its code by weeks even though the commits arrive in the opposite order.
 
 ## Status
 

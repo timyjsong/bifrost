@@ -4,7 +4,8 @@
  * property lives here as a tested, side-effect-free decision; the executor
  * (./confirm.ts) is a thin shell that only carries out an already-validated plan.
  *
- * Red-team evidence this encodes (phases/02-REDTEAM.md):
+ * Red-team evidence this encodes (from the Build 2 red-team pass; the report
+ * itself is not published — see `phases/02-start-restart.md` for why):
  *  - C1: bifrost.service's PATH has no ~/.local/bin, so a bare `claude` in a spawned
  *    pane dies "command not found" 100% of the time. The binary is referenced by
  *    ABSOLUTE PATH, resolved at build time, with a pre-spawn existence assertion.
@@ -13,7 +14,8 @@
  *    (`bifrost-spawn-<uuid8>`); the uuid carries all correctness weight (`--session-id`).
  *  - AC3.6: the built argv NEVER contains `-p`/`--print`/headless/SDK forms — the
  *    product invokes claude ONLY as an interactive `tmux new-session … <abs claude> …`
- *    launch (hard CLAUDE.md billing constraint). A guard re-asserts this on every build.
+ *    launch — the project's hard no-headless billing constraint, stated under
+ *    "Design constraints" in the README. A guard re-asserts this on every build.
  */
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -49,7 +51,7 @@ export function isAllowedModel(model: string): model is AllowedModel {
 
 /**
  * Forms that would make the launch headless / SDK / programmatic — forbidden by the
- * hard CLAUDE.md billing constraint. The argv guard rejects any of these appearing
+ * hard no-headless billing constraint. The argv guard rejects any of these appearing
  * anywhere in the built command, so a future edit can't silently smuggle one in.
  */
 const FORBIDDEN_ARGS = ["-p", "--print", "--headless", "--sdk", "--agent"] as const;
@@ -85,7 +87,7 @@ export interface SpawnPlan {
   uuid: string;
   /** The model alias — must be on MODEL_ALLOWLIST. */
   model: string;
-  /** The working directory — must be confined under /home/you (validate separately). */
+  /** The working directory — must be confined under the home root (validate separately). */
   cwd: string;
   /** Absolute claude binary path. Defaults to CLAUDE_BIN. */
   claudeBin?: string;
@@ -140,7 +142,7 @@ export interface ResumePlan {
   /** The session uuid to resume (`--resume`). Also seeds the tmux session name. */
   uuid: string;
   /** The working directory — the transcript's verified read-back cwd. NOT confined
-   *  to /home/you: resume is allowed for any directory (AC6.5), so the cwd is the
+   *  to the home root: resume is allowed for any directory (AC6.5), so the cwd is the
    *  session's own, taken as-is. */
   cwd: string;
   /** Absolute claude binary path. Defaults to CLAUDE_BIN. */
@@ -151,8 +153,8 @@ export interface ResumePlan {
  * Build the `tmux new-session` resume launch as ARGV (execFile-style). Unlike a
  * fresh spawn this carries NO `--model` (resume restores the session's own model)
  * and pins the uuid with `--resume <uuid>`. The cwd lands in argv as `-c <cwd>`,
- * untouched by any shell; it is NOT confined to /home/you (AC6.5 — resume is
- * allowed for any directory; only originate carries the /home/you guard). The cwd's
+ * untouched by any shell; it is NOT confined to the home root (AC6.5 — resume is
+ * allowed for any directory; only originate carries the home-root guard). The cwd's
  * existence is checked SEPARATELY by the caller (AC6.4 missing-cwd branch) before
  * this runs — this builder makes no filesystem decision.
  *
@@ -216,7 +218,7 @@ export function assertNoHeadless(argv: string[]): void {
 }
 
 /**
- * Confine a start-fresh cwd to under /home/you (AC3.4) by reusing the file-browser's
+ * Confine a start-fresh cwd to under the home root — homedir() (AC3.4) by reusing the file-browser's
  * canonicalizing confinement (./files/confine.ts) — symlink- and `..`-resolved, so a
  * symlink or `..` escape can't smuggle a cwd outside the home boundary. The cwd is
  * the one user-supplied input that picks WHERE a promptable claude runs, so it carries

@@ -13,29 +13,52 @@ export const ENROLL_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 type CodeMap = Record<string, number>; // code -> expiresAt (epoch ms)
 
-export function newEnrollCode(): string {
+function newEnrollCode(): string {
   // 12 bytes -> 16 base64url chars: high entropy, short enough to read/type.
   return randomBytes(12).toString("base64url");
 }
 
+/**
+ * Every mutation of the code map goes through this chain. Both mint and consume
+ * are read-modify-write over one shared file, so concurrency corrupts them in
+ * different ways: two consumes of the same code would both read the map before
+ * either wrote it back, both see the code, and both mint a device token from it —
+ * so single-use would hold only in the absence of a race. Two mints would each
+ * write a map that lacks the other's code, silently dropping one. The server is a
+ * single process, so an in-process chain is the whole boundary.
+ */
+let codeChain: Promise<unknown> = Promise.resolve();
+
+function serialized<T>(fn: () => Promise<T>): Promise<T> {
+  const run = codeChain.then(fn, fn); // run regardless of the prior op's outcome
+  codeChain = run.catch(() => {}); // a failure must not wedge the chain
+  return run;
+}
+
 /** Mint + persist a code valid for ENROLL_TTL_MS from `now`. Sweeps expired. */
-export async function mintEnrollCode(
+export function mintEnrollCode(
   now: number,
 ): Promise<{ code: string; expiresAt: number }> {
-  const code = newEnrollCode();
-  const expiresAt = now + ENROLL_TTL_MS;
-  const codes = await readJson<CodeMap>(FILE, {});
-  for (const [c, exp] of Object.entries(codes)) if (exp <= now) delete codes[c];
-  codes[code] = expiresAt;
-  await writeJsonAtomic(FILE, codes);
-  return { code, expiresAt };
+  return serialized(async () => {
+    const code = newEnrollCode();
+    const expiresAt = now + ENROLL_TTL_MS;
+    const codes = await readJson<CodeMap>(FILE, {});
+    for (const [c, exp] of Object.entries(codes)) if (exp <= now) delete codes[c];
+    codes[code] = expiresAt;
+    await writeJsonAtomic(FILE, codes);
+    return { code, expiresAt };
+  });
 }
 
 /**
  * Validate AND consume a code: true only if present and unexpired. Always deletes
  * the code (single-use) and opportunistically sweeps expired entries.
  */
-export async function consumeEnrollCode(code: string, now: number): Promise<boolean> {
+export function consumeEnrollCode(code: string, now: number): Promise<boolean> {
+  return serialized(() => consumeUnlocked(code, now));
+}
+
+async function consumeUnlocked(code: string, now: number): Promise<boolean> {
   const codes = await readJson<CodeMap>(FILE, {});
   const expiresAt = codes[code];
   let changed = false;

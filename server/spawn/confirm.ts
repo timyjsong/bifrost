@@ -4,7 +4,8 @@
  * result. It makes NO security decision — every property was decided upstream; this
  * file only carries the plan out and observes disk/tmux.
  *
- * Red-team evidence this encodes (phases/02-REDTEAM.md):
+ * Red-team evidence this encodes (from the Build 2 red-team pass; the report
+ * itself is not published — see `phases/02-start-restart.md` for why):
  *  - AC3.2 / spike-1: the spawn runs through the user's EXISTING tmux server (the default
  *    socket `/tmp/tmux-<uid>/default`), so the pane lands under the user session
  *    hierarchy (`user@<uid>.service/tmux-spawn-<uuid>.scope`) — never forked as a

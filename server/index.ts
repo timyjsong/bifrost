@@ -1211,7 +1211,7 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     }
     // The cwd carries RCE weight (it picks WHERE a promptable claude runs), so it
     // gets the same canonicalizing confinement the file browser uses — symlink/`..`
-    // escapes out of /home/you are rejected here as a 400 (AC5.1/AC5.5).
+    // escapes out of the home root are rejected here as a 400 (AC5.1/AC5.5).
     const confined = await confineSpawnCwd(valid.value.cwd);
     if (!confined.ok) {
       const reason: BadField = "bad-cwd";
@@ -1277,7 +1277,7 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
   // the tick snapshot (AC6.1); an already-live session routes to drive, never a
   // second claude (AC6.3); the launch cd's to the transcript's read-back cwd, and a
   // missing cwd is surfaced "degraded" not launched (AC6.4). Any directory resumes
-  // (AC6.5) — no /home/you confine.
+  // (AC6.5) — no home-root confine.
   const resumeMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/resume$/);
   if (resumeMatch && req.method === "POST") {
     if (spawnLimited(ip, now))

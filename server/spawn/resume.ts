@@ -23,7 +23,7 @@
  *  - AC6.4: launch `--resume <uuid>` cd'd to the transcript's read-back cwd; if that
  *    cwd no longer exists, surface "degraded — cwd missing" instead of launching.
  *  - AC6.5: resume is allowed for ANY directory (no realm confine — only originate
- *    has the /home/you guard).
+ *    has the home-root guard).
  */
 import { readFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
@@ -332,7 +332,7 @@ export async function resumeSession(
   }
 
   // Read the transcript's own cwd (AC6.4). The launch cd's HERE, not to a guessed
-  // slug-reversal — the slug is lossy. No /home/you confine (AC6.5).
+  // slug-reversal — the slug is lossy. No home-root confine (AC6.5).
   const cwd = await deps.readBackCwd();
   if (cwd === undefined) return { ok: false, reason: "degraded-cwd-unreadable" };
   if (!(await deps.cwdExists(cwd))) {

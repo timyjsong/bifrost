@@ -52,3 +52,27 @@ test("minting a fresh code sweeps an expired one", async () => {
   await enroll.mintEnrollCode(1000 + enroll.ENROLL_TTL_MS + 1); // now past stale's expiry
   expect(await enroll.consumeEnrollCode(stale, 1000 + enroll.ENROLL_TTL_MS + 2)).toBe(false);
 });
+
+// The single-use guarantee has to survive two devices posting the same code at
+// once — the failure mode is two valid tokens minted from one code, which is the
+// whole point of the code being single-use.
+test("concurrent consumes of one code: exactly one wins", async () => {
+  const { code } = await enroll.mintEnrollCode(1000);
+  const results = await Promise.all(
+    Array.from({ length: 8 }, () => enroll.consumeEnrollCode(code, 1001)),
+  );
+  expect(results.filter(Boolean).length).toBe(1);
+});
+
+test("concurrent consumes of distinct codes each win exactly once", async () => {
+  const codes = await Promise.all(
+    Array.from({ length: 4 }, () => enroll.mintEnrollCode(1000).then((r) => r.code)),
+  );
+  const results = await Promise.all(
+    codes.flatMap((c) => [
+      enroll.consumeEnrollCode(c, 1001),
+      enroll.consumeEnrollCode(c, 1001),
+    ]),
+  );
+  expect(results.filter(Boolean).length).toBe(4);
+});

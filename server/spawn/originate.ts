@@ -55,7 +55,7 @@ export const MAX_NAME_LEN = 80;
 /**
  * Validate the raw request (AC5.5). Pure and synchronous: it checks the model
  * against the allowlist, that cwd is a non-empty absolute-ish string (the REAL
- * confinement to /home/you is async — confineSpawnCwd — and runs next), and that
+ * confinement to the home root is async — confineSpawnCwd — and runs next), and that
  * an optional name is a bounded single-line string. The first failing field names
  * the 400 reason; the endpoint maps any failure to HTTP 400.
  */

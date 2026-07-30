@@ -16,8 +16,9 @@ They were written as working documents, not as public writing, and they are
 published close to as-written. The edits made before publishing were narrow:
 references to files that stay private were removed, and a few paths and hostnames
 were replaced with placeholders. Nothing was added with hindsight — where a spec
-guessed wrong, the correction is recorded in that doc's as-built section rather
-than quietly patched into the original.
+guessed wrong, the original wording stands and the correction sits beside it
+(`00-auth.md` carries an as-built section for exactly this reason; `02` records
+its pre-build spike evidence the same way).
 
 One consequence worth flagging: these read like internal notes, because that is
 what they are. The status line at the top of each is the honest state of that
