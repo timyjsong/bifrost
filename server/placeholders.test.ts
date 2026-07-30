@@ -520,6 +520,36 @@ describe("reality: fixtures do not name anything on this machine", () => {
     expect(bad).toEqual([]);
   });
 
+  // Raises the bar on the one attack this cannot prevent outright: adding a word
+  // here to wave through a single leak. A genuinely ordinary word is already all
+  // over the codebase for unrelated reasons, so a suppressed name that shadows a
+  // real directory has to EARN it by appearing widely — a name added to cover
+  // one comment will not.
+  //
+  // Stated honestly: a determined author could plant the name repeatedly and
+  // pass. Nothing inside a repo can stop the person editing its guard. This
+  // makes the lazy version fail, which is the version that actually happens.
+  test("a suppressed name that shadows a real directory is used widely", async () => {
+    const localRaw = new Set(localProjectNames().map((n) => n.toLowerCase()));
+    const shadowing = [...ORDINARY].filter((w) => localRaw.has(w));
+    const thin: string[] = [];
+    for (const w of shadowing) {
+      let n = 0;
+      for (const f of scannable) {
+        let text: string;
+        try {
+          text = await read(f);
+        } catch {
+          continue;
+        }
+        n += (text.toLowerCase().match(new RegExp(`(?:^|[^a-z0-9])${w}(?:$|[^a-z0-9])`, "g")) ?? [])
+          .length;
+      }
+      if (n < 5) thin.push(`${w} (${n} uses)`);
+    }
+    expect(thin).toEqual([]);
+  });
+
   // The channel the tree scan structurally cannot see — and the one a real leak
   // actually used: a commit message naming a client project.
   test("no commit message or author field names a real directory", async () => {
