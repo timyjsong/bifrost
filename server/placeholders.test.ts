@@ -261,10 +261,39 @@ describe("allowlist: fixtures use declared values only", () => {
   // substantive line is a regex export. A literal has nowhere to live.
   test("the unscanned module contains regex declarations and nothing else", async () => {
     const raw = await read(PATTERNS_MODULE);
-    const stripped = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    const lines = stripped.split("\n").map((l) => l.trim()).filter(Boolean);
+    const code = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const lines = code.split("\n").map((l) => l.trim()).filter(Boolean);
     const bad = lines.filter((l) => !/^export const [A-Z_0-9]+ = \/.*\/[gimsuy]*;$/.test(l));
     expect(bad).toEqual([]);
+  });
+
+  // Stripping comments to check the grammar leaves comments unchecked, which is
+  // its own hiding place — found by planting one there. The prose in this file
+  // gets the same value scan every other file gets.
+  test("the unscanned module's comments carry no identifier values", async () => {
+    const raw = await read(PATTERNS_MODULE);
+    const comments = [
+      ...(raw.match(/\/\*[\s\S]*?\*\//g) ?? []),
+      ...(raw.match(/^\s*\/\/.*$/gm) ?? []),
+    ].join("\n");
+    const offenders: string[] = [];
+    for (const [pat, ok] of [
+      [HOME_PATH, (v: string) => v.toLowerCase() === PLACEHOLDER.home],
+      [HOME_SLUG, (v: string) => v.toLowerCase() === PLACEHOLDER.homeSlug],
+      [TAILNET, (v: string) => v.includes(PLACEHOLDER.tailnet)],
+      [CGNAT, (v: string) => v === PLACEHOLDER.cgnat],
+      [EMAIL, (v: string) => v.endsWith(PLACEHOLDER.emailDomain)],
+      [UUID, (v: string) => FIXTURE_UUIDS.has(v.toLowerCase())],
+    ] as const) {
+      for (const m of comments.matchAll(pat as RegExp)) {
+        if (!(ok as (v: string) => boolean)(m[0])) offenders.push(m[0]);
+      }
+    }
+    for (const tok of comments.match(WORD_TOKEN) ?? []) {
+      const name = matchesRealName(tok);
+      if (name) offenders.push(`${tok} (real directory: ${name})`);
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
