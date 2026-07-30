@@ -99,28 +99,34 @@ async function allCommitMessages(): Promise<string> {
  * when every file under it is innocent.
  */
 async function historyText(): Promise<string> {
-  // --batch-all-objects, not rev-list: an object orphaned by a reset stays in
-  // the store and is still pushable, and the docstring above claims to cover
-  // "every blob ever committed" — reachability is a narrower promise than that.
+  // Paths come from rev-list (only reachable commits have paths)...
   const list = Bun.spawn(["git", "-C", repoRoot, "rev-list", "--all", "--objects"], {
     stdout: "pipe",
     stderr: "ignore",
   });
   const listing = await new Response(list.stdout).text();
   await list.exited;
-
-  const blobs: string[] = [];
   const paths: string[] = [];
   for (const line of listing.split("\n")) {
-    const [sha, ...rest] = line.split(" ");
-    if (!sha) continue;
-    const path = rest.join(" ");
+    const path = line.split(" ").slice(1).join(" ");
     if (path) paths.push(path);
-    // Binaries and compressed artifacts included: excluding them from history
-    // meant a blob committed then deleted was read by no check at all. They are
-    // decoded latin1 below so their printable strings survive.
-    if (path) blobs.push(sha);
   }
+
+  // ...but BLOBS come from the whole object store. An object orphaned by a
+  // reset or an amend stays in the store and is still pushable, so reachability
+  // is a narrower promise than "every blob ever committed". Binaries and
+  // compressed artifacts are included too: excluding them meant a blob committed
+  // and then deleted was read by no check at all.
+  const all = Bun.spawn(
+    ["git", "-C", repoRoot, "cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  const catalogue = await new Response(all.stdout).text();
+  await all.exited;
+  const blobs = catalogue
+    .split("\n")
+    .filter((l) => l.endsWith(" blob"))
+    .map((l) => l.split(" ")[0]);
 
   const proc = Bun.spawn(["git", "-C", repoRoot, "cat-file", "--batch"], {
     stdin: "pipe",
@@ -650,7 +656,10 @@ describe("reality: fixtures do not name anything on this machine", () => {
     }
     if (!realFragments.size) return skipNotice();
 
-    const text = await historyText();
+    // Working tree AND history: a value not yet committed is still a value
+    // about to be, and the first version of this read history alone.
+    const tree = (await scan(/[0-9a-f]{8,}/gi)).join("\n");
+    const text = (await historyText()) + "\n" + tree;
     const offenders = new Set<string>();
     for (const run of text.match(/[0-9a-f]{8,}/gi) ?? []) {
       const lower = run.toLowerCase();
