@@ -23,6 +23,9 @@ export const PLACEHOLDER = {
   cgnat: "100.100.100.100",
   emailDomain: "@example.com",
   noreplyDomain: "@users.noreply.github.com",
+  // The co-author trailer on every commit. Declared, not pattern-matched, so
+  // it is an allowed VALUE rather than an allowed shape.
+  coauthor: "noreply@anthropic.com",
 } as const;
 
 

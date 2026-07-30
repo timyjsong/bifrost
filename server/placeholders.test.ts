@@ -110,6 +110,9 @@ async function allCommitMessages(): Promise<string> {
  * when every file under it is innocent.
  */
 async function historyText(): Promise<string> {
+  // --batch-all-objects, not rev-list: an object orphaned by a reset stays in
+  // the store and is still pushable, and the docstring above claims to cover
+  // "every blob ever committed" — reachability is a narrower promise than that.
   const list = Bun.spawn(["git", "-C", repoRoot, "rev-list", "--all", "--objects"], {
     stdout: "pipe",
     stderr: "ignore",
@@ -213,9 +216,19 @@ const realNames = localProjectNames()
   .filter((n) => n.length >= 4 && n !== "bifrost" && !ORDINARY.has(n));
 
 /** The OS username, which is a bare token no path pattern would ever match. */
+/**
+ * Usernames belonging to CI accounts rather than to a person. A hosted runner
+ * executes as `runner`, and this repo's own prose uses that word — so checking
+ * for it turns every CI run red while proving nothing about disclosure. Checked
+ * by simulating a runner, after the previous version of this reasoning shipped
+ * broken.
+ */
+const CI_ACCOUNTS = new Set(["runner", "runneradmin", "ubuntu", "root", "build", "ci"]);
+
 const realUser = (() => {
   try {
-    return userInfo().username.toLowerCase();
+    const u = userInfo().username.toLowerCase();
+    return CI_ACCOUNTS.has(u) ? "" : u;
   } catch {
     return "";
   }
@@ -340,7 +353,10 @@ describe("shape: no real machine identifiers", () => {
   test("every e-mail address sits in the RFC 2606 reserved domain", async () => {
     const hits = await scan(EMAIL);
     const bad = hits.filter(
-      (h) => !h.endsWith(PLACEHOLDER.emailDomain) && !h.endsWith(PLACEHOLDER.noreplyDomain),
+      (h) =>
+        !h.endsWith(PLACEHOLDER.emailDomain) &&
+        !h.endsWith(PLACEHOLDER.noreplyDomain) &&
+        !h.endsWith(PLACEHOLDER.coauthor),
     );
     expect(bad).toEqual([]);
   });
@@ -579,7 +595,7 @@ describe("reality: fixtures do not name anything on this machine", () => {
       [OPAQUE_ID, () => false],
       // Present in the working-tree scan but omitted here, which meant a value
       // only ever committed in an older revision was checked by nothing.
-      [EMAIL, (v) => v.endsWith(PLACEHOLDER.emailDomain) || v.endsWith(PLACEHOLDER.noreplyDomain)],
+      [EMAIL, (v) => v.endsWith(PLACEHOLDER.emailDomain) || v.endsWith(PLACEHOLDER.noreplyDomain) || v === PLACEHOLDER.coauthor],
       [CONCAT_HOME, () => false],
     ];
     for (const [pat, ok] of checks) {
@@ -593,15 +609,18 @@ describe("reality: fixtures do not name anything on this machine", () => {
   // clean. Read from the machine the same way directories are.
   test("no blob, path or message carries the bare OS username", async () => {
     if (!realUser || realUser.length < 3) return skipNotice();
-    // The AUTHOR'S NAME is deliberately published — it is the copyright holder
-    // in LICENSE and the author of every commit. What must not be published is
-    // the OS USERNAME as a system identifier: in paths, configs, and process
-    // listings. Those happen to share a prefix here, so the declared full name
-    // is removed before scanning rather than the check being weakened.
-    const authorName = (await gitAuthorName()).trim();
-    const corpus = ((await historyText()) + "\n" + (await allCommitMessages()))
-      .split(authorName)
-      .join(" ");
+    // The AUTHOR'S NAME is deliberately published — copyright holder in LICENSE,
+    // author of every commit. The OS USERNAME as a system identifier is not.
+    //
+    // Earlier this subtracted `git log -1 --format=%an` from the corpus, which
+    // is data the scan is supposed to be checking: setting the tip commit's
+    // author to the username erased a planted leak outright. The exemptions are
+    // now fixed and structural — the copyright line and the identity fields —
+    // so nothing the scan reads can switch the scan off.
+    const corpus = (await historyText())
+      .split("\n")
+      .filter((l) => !/^Copyright \(c\) \d{4}/.test(l.trim()))
+      .join("\n");
     const offenders = new Set<string>();
     for (const tok of corpus.match(WORD_TOKEN) ?? []) {
       const lower = tok.toLowerCase();
@@ -610,6 +629,46 @@ describe("reality: fixtures do not name anything on this machine", () => {
     // Bare-word occurrences too: "runs as <user>", "box as <user>".
     const bare = new RegExp(`(?:^|[^a-z0-9])${realUser}(?:$|[^a-z0-9])`, "gi");
     for (const m of corpus.matchAll(bare)) offenders.add(m[0].trim());
+    expect([...offenders]).toEqual([]);
+  });
+
+  // The class that got past six passes: a FRAGMENT. The uuid allowlist only ever
+  // matched the full 36-character form, so a fixture built by slicing a real
+  // log — twelve hex characters here, an eight-character upload id there —
+  // looked like nothing at all. Real ids are enumerable on this machine, so
+  // every hex run of eight or more is checked against them directly.
+  test("no hex fragment in history belongs to a real session or upload", async () => {
+    const projects = join(homedir(), ".claude", "projects");
+    if (!existsSync(projects)) return skipNotice();
+
+    const realFragments = new Set<string>();
+    for (const slug of readdirSync(projects)) {
+      let entries: string[];
+      try {
+        entries = readdirSync(join(projects, slug));
+      } catch {
+        continue;
+      }
+      for (const f of entries) {
+        const id = f.replace(/\.jsonl$/i, "").toLowerCase();
+        if (!/^[0-9a-f-]{36}$/.test(id)) continue;
+        // Any hex run of a real id, in either the dashed or bare spelling: a
+        // slice can land on a segment boundary or straight through one.
+        for (const part of id.split("-")) if (part.length >= 8) realFragments.add(part);
+        const bare = id.replace(/-/g, "");
+        for (let i = 0; i + 12 <= bare.length; i += 4) realFragments.add(bare.slice(i, i + 12));
+      }
+    }
+    if (!realFragments.size) return skipNotice();
+
+    const text = await historyText();
+    const offenders = new Set<string>();
+    for (const run of text.match(/[0-9a-f]{8,}/gi) ?? []) {
+      const lower = run.toLowerCase();
+      for (const frag of realFragments) {
+        if (lower.includes(frag)) offenders.add(`${run} (real fragment: ${frag})`);
+      }
+    }
     expect([...offenders]).toEqual([]);
   });
 
@@ -631,14 +690,22 @@ describe("reality: fixtures do not name anything on this machine", () => {
 
   test("no commit message carries a machine identifier", async () => {
     const text = await allCommitMessages();
-    for (const pat of [HOME_PATH, HOME_SLUG, TAILNET, CGNAT]) {
+    // UUID and EMAIL were absent here while both were enforced everywhere else —
+    // and the identity fields are the one place an address exists on EVERY
+    // commit, so this was the channel with the least coverage and the most
+    // traffic.
+    for (const pat of [HOME_PATH, HOME_SLUG, TAILNET, CGNAT, UUID, EMAIL, CONCAT_HOME]) {
       const bad = [...text.matchAll(pat)].map((m) => m[0]);
       const ok = bad.filter(
         (v) =>
           v.toLowerCase() !== PLACEHOLDER.home &&
           v.toLowerCase() !== PLACEHOLDER.homeSlug &&
           !v.includes(PLACEHOLDER.tailnet) &&
-          v !== PLACEHOLDER.cgnat,
+          v !== PLACEHOLDER.cgnat &&
+          !v.endsWith(PLACEHOLDER.emailDomain) &&
+          !v.endsWith(PLACEHOLDER.noreplyDomain) &&
+          v !== PLACEHOLDER.coauthor &&
+          !FIXTURE_UUIDS.has(v.toLowerCase()),
       );
       expect(ok).toEqual([]);
     }

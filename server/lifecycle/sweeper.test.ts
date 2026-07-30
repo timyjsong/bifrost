@@ -17,7 +17,10 @@ describe("parseParkLog — the observe-log tail → entries (arming-readiness su
   });
 
   test("skips a partial leading line (a byte-offset tail read) and corrupt lines", () => {
-    const partial = 'ffff9999aaaa","mode":"observe"}\n' + log; // fragment from a mid-line slice
+    // A synthetic tail: the shape matters (a line that starts mid-token), not
+    // the bytes. An earlier version sliced this from a real log and published
+    // twelve hex characters of a real session id along with it.
+    const partial = 'ffff9999aaaa","mode":"observe"}\n' + log;
     const out = parseParkLog(partial + "not json\n", 50);
     expect(out.map((e) => e.uuid)).toEqual(["c", "b", "a"]);
   });
