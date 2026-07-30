@@ -27,6 +27,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { homedir } from "node:os";
+import { existsSync, readdirSync } from "node:fs";
 
 const repoRoot = join(import.meta.dir, "..");
 
@@ -68,6 +70,57 @@ async function scan(pattern: RegExp): Promise<string[]> {
   }
   return hits;
 }
+
+// The check that would actually have caught the leak that got out: compare
+// fixture names against the directories that exist on THIS machine. Shape and
+// vocabulary checks are both blind to a real project name — only reality is
+// not. Skipped where the directories do not exist (CI), which is honest: there
+// is nothing to leak from a machine that has none of them.
+describe("fixtures do not name a real directory on this machine", () => {
+  /** Directory names under the developer's real work/project roots. */
+  function localProjectNames(): string[] {
+    const roots = ["work", "projects", "code", "src"].map((d) => join(homedir(), d));
+    const names: string[] = [];
+    for (const r of roots) {
+      if (!existsSync(r)) continue;
+      try {
+        for (const e of readdirSync(r, { withFileTypes: true })) {
+          if (e.isDirectory() && !e.name.startsWith(".")) names.push(e.name);
+        }
+      } catch {
+        /* unreadable root */
+      }
+    }
+    return names;
+  }
+
+  // Scoped to PATH POSITIONS, not prose: a machine can have a directory called
+  // something that is also an ordinary English word, and flagging every prose
+  // use of it would make this unrunnable. The leak vector is a real name inside
+  // a fixture path or slug, so that is exactly what is compared.
+  test("no fixture path segment names a directory from this machine's roots", async () => {
+    const local = new Set(
+      localProjectNames()
+        .filter((n) => n.length >= 4 && !["bifrost", "web", "src", "code"].includes(n))
+        .map((n) => n.toLowerCase()),
+    );
+    if (!local.size) return; // no roots here — nothing to compare against
+
+    const hits = await scan(/(?:\/home\/you|-home-you)[A-Za-z0-9._/-]*/g);
+    const offenders: string[] = [];
+    for (const hit of hits) {
+      const value = hit.slice(hit.indexOf("  ") + 2).toLowerCase();
+      for (const name of local) {
+        // Boundary-delimited substring, not a split on "-": a hyphenated name
+        // like "<word>-<word>" never survives splitting into segments, which is
+        // exactly the shape the real leak had.
+        const re = new RegExp(`(?:^|[/_-])${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$|[/_.-])`);
+        if (re.test(value)) offenders.push(`${hit}  (real directory: ${name})`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
 
 describe("no real machine identifiers are published", () => {
   test("git ls-files returned something — the scan is not vacuously passing", () => {
@@ -116,6 +169,9 @@ describe("no real machine identifiers are published", () => {
     "atlas", "atlas-web", "ledger", "ledger-api", "vector", "vector-lab",
     "bifrost", "proj", "myproj", "project", "app",
     "gone", "old", "secrets", "contraband",
+    // NOTE: single-letter entries below are throwaway fixture names. They are
+    // deliberately NOT usable as a prefix (see the exact-match check), because
+    // "a-<realname>" would otherwise launder a real name past this list.
     // names invented for specific fixtures — each one added here should be a
     // deliberate "yes, I made this up", which is the whole point of the list
     "other", "demo-trader", "__nope_does_not_exist__", "my", "my.proj",
@@ -145,7 +201,9 @@ describe("no real machine identifiers are published", () => {
       // A slug flattens sub-paths into dashes, so accept any leading run that
       // is itself a declared name (work-atlas-web -> atlas-web).
       if (DEMO_PROJECTS.has(name)) continue;
-      if ([...DEMO_PROJECTS].some((d) => name === d || name.startsWith(d + "-"))) continue;
+      // Prefix acceptance only for multi-character declared names — a single
+      // letter prefixing a real name ("a-acme-client") must not pass.
+      if ([...DEMO_PROJECTS].some((d) => d.length > 2 && name.startsWith(d + "-"))) continue;
       offenders.add(`${hit}  (project: ${seg})`);
     }
     expect([...offenders]).toEqual([]);
