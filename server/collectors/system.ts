@@ -101,15 +101,24 @@ async function collectProcs(): Promise<{
   return { procs, claudeTotalRssKb, pidTree, allProcs: all };
 }
 
-async function collectTmux(): Promise<TmuxInfo[]> {
-  const out = await run([
-    "tmux", "ls", "-F",
-    "#{session_name}\t#{session_windows}\t#{session_created}\t#{session_attached}",
-  ]);
-  if (!out) return [];
+/**
+ * Field separator for tmux `-F` formats. Deliberately NOT a tab: tmux replaces
+ * control characters with `_` on the way out — 3.6 does it in format output, not
+ * just in names — so a tab-separated format arrives as one unsplittable field.
+ * Every lookup then returns nothing, which reads downstream as "there is no tmux
+ * on this box" and silently gates the entire drive feature off.
+ *
+ * `:` is safe: tmux itself rewrites `:` to `_` in session names, so it cannot
+ * occur inside that field, and the others here (a tty path and two integers)
+ * can't contain one either.
+ */
+const TMUX_SEP = ":";
+
+/** Pure: parse `tmux ls -F` output into session rows. */
+export function parseTmuxSessions(raw: string): TmuxInfo[] {
   const sessions: TmuxInfo[] = [];
-  for (const line of out.split("\n")) {
-    const [name, windows, created, attached] = line.split("\t");
+  for (const line of raw.split("\n")) {
+    const [name, windows, created, attached] = line.split(TMUX_SEP);
     if (!name || windows === undefined) continue;
     sessions.push({
       name,
@@ -121,21 +130,35 @@ async function collectTmux(): Promise<TmuxInfo[]> {
   return sessions;
 }
 
-/** Every pane's tty → tmux session, for matching processes into tmux. */
-async function collectTmuxPanes(): Promise<TmuxPane[]> {
+async function collectTmux(): Promise<TmuxInfo[]> {
   const out = await run([
-    "tmux", "list-panes", "-a", "-F",
-    "#{pane_tty}\t#{session_name}\t#{session_attached}",
+    "tmux", "ls", "-F",
+    `#{session_name}${TMUX_SEP}#{session_windows}${TMUX_SEP}#{session_created}${TMUX_SEP}#{session_attached}`,
   ]);
   if (!out) return [];
+  return parseTmuxSessions(out);
+}
+
+/** Pure: parse `tmux list-panes -a -F` output into tty → session rows. */
+export function parseTmuxPanes(raw: string): TmuxPane[] {
   const panes: TmuxPane[] = [];
-  for (const line of out.split("\n")) {
-    const [tty, session, attached] = line.split("\t");
+  for (const line of raw.split("\n")) {
+    const [tty, session, attached] = line.split(TMUX_SEP);
     if (!tty || !session) continue;
     // session_attached counts attached clients
     panes.push({ tty, session, attached: Number(attached) > 0 });
   }
   return panes;
+}
+
+/** Every pane's tty → tmux session, for matching processes into tmux. */
+async function collectTmuxPanes(): Promise<TmuxPane[]> {
+  const out = await run([
+    "tmux", "list-panes", "-a", "-F",
+    `#{pane_tty}${TMUX_SEP}#{session_name}${TMUX_SEP}#{session_attached}`,
+  ]);
+  if (!out) return [];
+  return parseTmuxPanes(out);
 }
 
 async function collectPorts(): Promise<PortInfo[]> {

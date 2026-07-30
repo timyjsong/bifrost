@@ -20,6 +20,12 @@ I built it because I was driving Claude Code by sshing into a box and reattachin
 
 ![Driving a session](docs/drive.png)
 
+The same session from a phone — the form factor the whole thing was built for:
+
+<img src="docs/mobile-drive.png" alt="Driving a session from a phone" width="340">
+
+*(Screenshots are taken against a demo fixture, not my own box.)*
+
 **Alerts and push.** A signal engine derives 13 tunable signals (session waiting, approval needed, memory pressure, service down, and so on) and maps them to Web Push notifications, which work away from your network. Session alerts deep-link into the drive view. Which units get watched is configuration, and an unconfigured install watches nothing rather than alerting about services it invented.
 
 **Search and history.** Sessions are indexed mtime-first and persisted across restarts, so a cold start doesn't re-parse the whole transcript pile. Name search filters the full uncapped set in memory on every keystroke. Pinning keeps a session surfaced past the history cutoff.
@@ -67,7 +73,7 @@ deploy/bifrost.service systemd unit
 
 ## Tests
 
-`bun run check` runs the unit suite plus server and web typechecks; CI runs it on every push, so the badge above is the current answer rather than a number in a README. At the time of writing it is 761 tests across 75 files.
+`bun run check` runs the unit suite plus server and web typechecks; CI runs it on every push, so the badge above is the current answer rather than a number in a README. At the time of writing it is 769 tests across 76 files.
 
 The tests cover the logic layer: transcript parsing, state derivation, process attribution, tmux target validation, menu parsing, spawn confinement and the resume liveness gate, picker option matching, the summarize queue, auth, window resolution, filters, and view models. They are written from the requirement, not the implementation — a failing test means the behavior changed, not that the test needs updating.
 

@@ -489,7 +489,11 @@ const CSP = [
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
-  "font-src 'self'",
+  // `data:` is required, not lax: Vite inlines small font files into the CSS
+  // bundle as data URIs, and 'self' alone silently blocks them — the app renders
+  // in a fallback face and only says so in the console. A font cannot execute,
+  // so this costs nothing the way a `data:` script or frame would.
+  "font-src 'self' data:",
   "connect-src 'self'",
   "manifest-src 'self'",
   "object-src 'none'",
