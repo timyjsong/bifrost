@@ -89,6 +89,24 @@ async function allCommitMessages(): Promise<string> {
 }
 
 /**
+ * Commit message BODIES only — no identity fields.
+ *
+ * Separate from `allCommitMessages` because the OS-username check cannot read
+ * the identity fields: the published author name and the OS username are the
+ * same token, so including `%an`/`%ae` there would fire on all 80 commits and
+ * the check would have to be deleted. Bodies carry no such collision.
+ */
+async function allCommitBodies(): Promise<string> {
+  const proc = Bun.spawn(["git", "-C", repoRoot, "log", "--all", "--format=%B"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out;
+}
+
+/**
  * Every blob and every path ever committed.
  *
  * The index is the wrong artifact. Scanning `git ls-files` means a value removed
@@ -123,9 +141,14 @@ async function historyText(): Promise<string> {
   );
   const catalogue = await new Response(all.stdout).text();
   await all.exited;
+  // TAG objects as well as blobs. An annotated tag carries a message and a
+  // tagger identity, and neither is a blob — nor does `git log --format=%B`
+  // print them — so `git tag -a v1 -m "cut for the <client> demo"` was a
+  // channel with no reader at all. Latent when this was written (the repo has
+  // no tags), which is exactly when it is cheap to close.
   const blobs = catalogue
     .split("\n")
-    .filter((l) => l.endsWith(" blob"))
+    .filter((l) => l.endsWith(" blob") || l.endsWith(" tag"))
     .map((l) => l.split(" ")[0]);
 
   const proc = Bun.spawn(["git", "-C", repoRoot, "cat-file", "--batch"], {
@@ -147,6 +170,16 @@ async function historyText(): Promise<string> {
 const files = await trackedTextFiles();
 const scannable = files.filter((f) => f !== PATTERNS_MODULE);
 const read = (f: string) => Bun.file(join(repoRoot, f)).text();
+
+/** Every tracked file's CURRENT contents, prefixed by its path. History is what
+ *  a reader clones, but a value sitting in the tree is a value about to be
+ *  committed — the fragment check reads both for exactly that reason, and the
+ *  username check used to read neither the tree nor the messages. */
+async function workingTreeText(): Promise<string> {
+  const parts: string[] = [];
+  for (const f of scannable) parts.push(`${f}\n${await read(f)}`);
+  return parts.join("\n");
+}
 
 /** Where a match lives, so a failure names the file and line, not just the value. */
 async function scan(pattern: RegExp): Promise<string[]> {
@@ -448,6 +481,20 @@ describe("allowlist: fixtures use declared values only", () => {
   });
 });
 
+// ⚠ WHAT THE CI BADGE DOES AND DOES NOT ATTEST TO.
+//
+// These checks derive ground truth from the host they run on — `homedir()`, the
+// directories under it, the session ids in ~/.claude. On a CI runner that is not
+// an empty set, it is a DIFFERENT set: the runner's own directories. So they do
+// not skip there, they run against the wrong reality and go green having compared
+// fixtures to nothing that could leak. `skipNotice` only fires when the set is
+// empty, which on a runner-shaped HOME it is not.
+//
+// What the badge therefore covers is the machine-independent SHAPE checks — home
+// paths, CGNAT addresses, e-mail, uuid allowlists — which do fire anywhere. A bare
+// client or project name, carrying no shape at all, is only caught when this suite
+// runs on the developer's own box. Run it there with BIFROST_REALITY_CHECKS=1
+// before publishing; a green badge alone is not that guarantee.
 describe("reality: fixtures do not name anything on this machine", () => {
   test("no fixture PATH segment names a real directory", async () => {
     if (!realNames.length) return skipNotice();
@@ -602,7 +649,7 @@ describe("reality: fixtures do not name anything on this machine", () => {
   // The bare OS username: not a path, not a slug, not a name — invisible to
   // every pattern here, and it was live in 38 commits while this guard reported
   // clean. Read from the machine the same way directories are.
-  test("no blob, path or message carries the bare OS username", async () => {
+  test("no blob, path, message or working-tree file carries the bare OS username", async () => {
     if (!realUser || realUser.length < 3) return skipNotice();
     // The AUTHOR'S NAME is deliberately published — copyright holder in LICENSE,
     // author of every commit. The OS USERNAME as a system identifier is not.
@@ -612,7 +659,21 @@ describe("reality: fixtures do not name anything on this machine", () => {
     // author to the username erased a planted leak outright. The exemptions are
     // now fixed and structural — the copyright line and the identity fields —
     // so nothing the scan reads can switch the scan off.
-    const corpus = (await historyText())
+    //
+    // This test was NAMED for messages while reading `historyText()` alone,
+    // which is blobs and paths. A helper that exists is not a helper that is
+    // called: `allCommitMessages` sat unused here, so the username was catchable
+    // in a committed blob and invisible in a commit message, in the working tree,
+    // and in the tree's paths. Corpus now matches the name.
+    //
+    // The IDENTITY FIELDS stay out, structurally and on purpose: `%an`/`%ae`
+    // carry the published author name, which lowercases to this very token, so
+    // including them would fire on every commit and force this check to be
+    // deleted rather than fixed. That is a real blind spot, named here rather
+    // than left as a silent absence — the username in an author field is not
+    // detectable by this test and never can be.
+    const corpus = [await historyText(), await allCommitBodies(), await workingTreeText()]
+      .join("\n")
       .split("\n")
       .filter((l) => !/^Copyright \(c\) \d{4}/.test(l.trim()))
       .join("\n");
