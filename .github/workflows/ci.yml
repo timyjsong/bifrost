@@ -32,10 +32,12 @@ jobs:
         run: bun run check
 
       # Fails the build on lint ERRORS. Warnings are surfaced but not gating:
-      # there are currently 20 react-hooks warnings whose real fix is
-      # restructuring effect logic in the drive view, which wants live
-      # verification rather than a blind refactor. Stated here so a green check
-      # isn't read as "lint is clean".
+      # there are currently 15 react-hooks warnings, all reviewed. The ones that
+      # were real were fixed; the rest are subscribe-and-reset effects and mount
+      # effects that the compiler-era rules flag by shape, and rewriting working
+      # state logic with no component tests trades one risk for another.
+      # web/eslint.config.js records which is which. Stated here so a green
+      # check isn't read as "lint is clean".
       - name: Lint (web)
         working-directory: web
         run: bunx eslint .

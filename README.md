@@ -30,7 +30,7 @@ The same session from a phone — the form factor the whole thing was built for:
 
 **Search and history.** Sessions are indexed mtime-first and persisted across restarts, so a cold start doesn't re-parse the whole transcript pile. Searching by name filters the full uncapped set in memory on every keystroke — no I/O, so it runs as you type. Searching by *content* is a separate path: `grep -rilF` names candidate transcript files, then the newest candidates are scanned in-process for a readable snippet, and a hit only counts if the term appears in conversation text rather than buried in a tool payload. There is no search index and no database — the JSONL corpus is the store. Pinning keeps a session surfaced past the history cutoff.
 
-**Summaries.** One click summarizes a transcript using a background Claude session. A queue sized from the box's RAM keeps concurrent jobs bounded; results are cached until the transcript changes.
+**Summaries.** One click summarizes a transcript using a background Claude session. A queue sized from the memory ceiling the jobs actually run under keeps concurrent jobs bounded; results are cached until the transcript changes.
 
 **Projects and files.** Project cards show branch, dirty state, and recent activity for each configured directory. A read-only file browser confines every request to a project root via realpath — path traversal and symlink escapes resolve outside the root and are rejected.
 
@@ -47,7 +47,8 @@ The same session from a phone — the form factor the whole thing was built for:
 
 ```
 server/                Bun + TypeScript (run natively, no build step)
-  index.ts             HTTP + SSE + static serving of web/dist
+  index.ts             HTTP + SSE + static serving of web/dist; route handlers
+  routes/              the API surface as data + the pure route matcher
   collectors/          sessions (transcripts + /proc), projects (git), system,
                        persisted mtime-first session index
   drive/               transcript parser, tmux send + target validation,
@@ -61,6 +62,7 @@ server/                Bun + TypeScript (run natively, no build step)
   alerts/              signal derivation, alert engine, Web Push, VAPID keys
   auth/                request guard, tokens, enrollment, throttle + CLI
   files/               realpath-confined read-only browser
+  testing/             temp-dir helper the suite sweeps on teardown
 web/                   Vite + React 19 + Tailwind v4 SPA
 shared/                the Snapshot type + the alert-signal catalog, both sides
 phases/                the design docs each build was greenlit against
@@ -73,15 +75,25 @@ deploy/bifrost.service systemd unit
 
 ## Tests
 
-`bun run check` runs the unit suite plus server and web typechecks; CI runs it on every push, so the badge above is the current answer rather than a number in a README. At the time of writing it is 769 tests across 76 files.
+`bun run check` runs the unit suite plus server and web typechecks; CI runs it on every push, so the badge above is the current answer rather than a number in a README. At the time of writing it is 876 tests across 81 files.
 
 The tests cover the logic layer: transcript parsing, state derivation, process attribution, tmux target validation, menu parsing, spawn confinement and the resume liveness gate, picker option matching, the summarize queue, auth, window resolution, filters, and view models. They are written from the requirement, not the implementation — a failing test means the behavior changed, not that the test needs updating.
 
-Coverage is uneven, and the distribution is worth stating rather than hiding behind the total. `bun test --coverage` reports about 90% of lines overall, but it is concentrated where the security and correctness decisions live: `server/auth/guard.ts` and `tokens.ts`, `server/derive.ts`, `server/files/confine.ts`, `server/spawn/{spawn,originate,resume,restart}.ts` and the pure web view-models (`selectors`, `cardModel`, `format`, `keymap`) are at or near 100%.
+Coverage is uneven, and the distribution is worth stating rather than hiding behind the total — including the part of the total that is doing the hiding. `bun test --coverage` reports 89%, but Bun only instruments files a test actually imports, and 38 source files totalling about 7,700 lines are imported by no test at all. They are not in that denominator. Measured against the whole tree it is closer to **52%**, and the single largest absence is `server/index.ts` — 1,437 lines holding every API handler, loaded by nothing. Also absent: the Web Push delivery path (`alerts/manager.ts`, `push.ts`, `vapid.ts`), `drive/drafts.ts`, `drive/slash.ts`, `auth/cli.ts`, and all fourteen React components.
 
-It thins out fast outside that, and the thin parts are worth naming rather than leaving you to find them: `server/collectors/sessions.ts` — the largest file, and the one behind the transcript-plus-`/proc` claim — is around 53%, `server/collectors/system.ts` is 18%, `server/collectors/projects.ts` has no test file at all, `server/spawn/memgate.ts` is 75%, and on the web side the modules that are mostly network plumbing are barely covered (`web/src/lib/drive.ts` 33%, `push.ts` 27%, `api.ts` 3%). `server/index.ts` has no route tests and there are no component tests; the HTTP layer is verified by hand and presentation by eye.
+What the 89% does describe is real, and it is concentrated where the security and correctness decisions live: `server/auth/guard.ts` and `tokens.ts`, `server/derive.ts`, `server/files/confine.ts`, `server/spawn/{spawn,originate,resume,restart}.ts` and the pure web view-models (`selectors`, `cardModel`, `format`, `keymap`) are at or near 100%.
 
-The pattern is that the *decisions* are tested and the *plumbing* mostly isn't. That is a defensible place to be while shipping, and an indefensible place to stay. Extracting the route table out of `server/index.ts` — 1,600 lines of inline path matching — is what makes route tests writable, so that is the next thing rather than more unit tests around the edges.
+It thins out fast outside that, and the thin parts are worth naming rather than leaving you to find them: `server/collectors/sessions.ts` — the largest file, and the one behind the transcript-plus-`/proc` claim — is around 55%, `server/collectors/system.ts` is 34%, `server/spawn/memgate.ts` is 75%, and on the web side the modules that are mostly network plumbing are barely covered (`web/src/lib/drive.ts` 33%, `push.ts` 27%, `api.ts` 3%). **`server/index.ts` still has no tests that load it, and there are no component tests at all** — the HTTP layer is verified by hand against a running instance, and presentation by eye.
+
+Two of the gaps named in earlier versions of this paragraph are now closed. `server/collectors/projects.ts` went from no test file to 96%, tested against real directories and real `git` rather than a mocked spawn. `server/collectors/system.ts` roughly doubled — what was untested there was never the shelling out but the parsing of what came back, so those parses were lifted out pure and tested against the shapes that actually break naive parsers: a process whose `comm` contains spaces and parentheses, IPv6 listeners that must not be split on the wrong colon, counters that appear to run backwards across a suspend. The remainder of that file is process invocation, which is integration territory and deliberately not faked.
+
+The pattern is that the *decisions* are tested and the *plumbing* mostly isn't. That is a defensible place to be while shipping, and an indefensible place to stay.
+
+The last version of this README said extracting the route table out of `server/index.ts` — then 1,600 lines of inline path matching — was the next thing, because it is what makes route tests writable. That is done. Matching is now a pure function over a table (`server/routes/table.ts`), and the surface itself is data in `server/routes/api.ts` that imports nothing from the server, so it can be asserted without booting one; handlers are supplied as a `Record<RouteName, Handler>`, which turns "declared a route, forgot the handler" from a 404 into a compile error. The same pass collapsed three near-identical picker orchestrations into one, and put the closed-loop TUI navigation under test — including that a dropped keypress is recovered, which is the entire reason that loop is closed rather than counted.
+
+Two honest limits on that. The route *table* is tested and the route *handlers* are not: they still live inline in `server/index.ts`, which no test imports, so what is covered is the matching and the shape of the surface, not the bodies. And the surface-as-data is 30 of 38 endpoints — the push and alerts routes remain a small if-chain in `alerts/manager.ts`, reached before the table.
+
+The honest next thing is component tests. There are none, which is why the React hooks warnings in `web/` are still warnings: the compiler-era rules flag real patterns there, but rewriting working state logic with no safety net trades one risk for another. `web/eslint.config.js` records which of those warnings were reviewed and fixed and which are deliberate.
 
 ## Requirements
 
