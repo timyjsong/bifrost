@@ -1428,10 +1428,14 @@ setInterval(slowTick, cfg.refresh.slowMs);
 
 console.log(`[bifrost] watching from http://${server.hostname}:${server.port}`);
 const lim = summarizeLimits(cfg);
+// The two numbers have DIFFERENT bases, so each states its own. Reporting one
+// basis for both is how the reserve floor came to be logged against the cgroup
+// while pump() enforced it against the box — see summarizeLimits.
 console.log(
-  `[bifrost] summarize: ${lim.maxInFlight} concurrent slots, ${lim.reserveMb}MB reserve floor ` +
+  `[bifrost] summarize: ${lim.maxInFlight} concurrent slots ` +
     (lim.basis === "cgroup"
-      ? `(derived from this unit's ${(lim.cgroupMaxMb! / 1024).toFixed(1)}G MemoryMax — ` +
-        `the jobs run inside it; box is ${(lim.totalMb / 1024).toFixed(1)}G)`
-      : `(derived from ${(lim.totalMb / 1024).toFixed(1)}G box — this unit has no MemoryMax)`),
+      ? `(fits this unit's ${(lim.cgroupMaxMb! / 1024).toFixed(1)}G MemoryMax — the jobs run inside it)`
+      : `(from the ${(lim.totalMb / 1024).toFixed(1)}G box — this unit has no MemoryMax)`) +
+    `, ${lim.reserveMb}MB free-RAM floor ` +
+    `(from the ${(lim.totalMb / 1024).toFixed(1)}G box — the queue holds when the machine itself is under pressure)`,
 );
