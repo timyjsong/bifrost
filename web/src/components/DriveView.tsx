@@ -164,10 +164,15 @@ export function DriveView({
   session,
   onClose,
   onRestarted,
+  now,
 }: {
   session: SessionInfo;
   onClose: () => void;
   onRestarted: (sessionId: string) => void;
+  /** App's 1s clock. Passed in rather than read here so the render stays pure —
+   *  the grace countdown is a function of props, not of when React happened to
+   *  re-run this component. */
+  now: number;
 }) {
   const { state, connected } = useSessionStream(session.sessionId);
   const pane = usePaneState(session.sessionId);
@@ -401,7 +406,7 @@ export function DriveView({
   // session with a live subagent read as plain idle while driving. Reuses the
   // dashboard's tested grouping so identical fan-outs fold into one ×N line.
   const bgGroups = groupChildren(session.children ?? []);
-  const graceLeft = graceUntil ? Math.max(0, Math.ceil((graceUntil - Date.now()) / 1000)) : 0;
+  const graceLeft = graceUntil ? Math.max(0, Math.ceil((graceUntil - now) / 1000)) : 0;
   // Current permission mode: the optimistic pick until the pane poll confirms it.
   const currentMode = modeOptimistic ?? pane?.mode ?? null;
 
@@ -633,17 +638,13 @@ export function DriveView({
     return () => clearTimeout(t);
   }, [modeOptimistic]);
 
-  // A different session opened — drop any stale optimistic flip and grace window
-  // (a send parked for the previous session still fires server-side; the UI just
-  // stops tracking it here).
-  useEffect(() => {
-    setOptimistic(null);
-    setGraceUntil(null);
-    setPending(null);
-    setAttachments([]);
-    setModeOptimistic(null);
-    failAck.current = 0; // a new session's failures deserve their own surfacing
-  }, [session.sessionId]);
+  // A different session opened — nothing to reset here. App renders
+  // <DriveView key={session.sessionId}>, so switching sessions REMOUNTS this
+  // component and every optimistic flip, grace window, pending send and
+  // attachment list starts fresh on its own. The effect that used to clear them
+  // by hand was keyed on the same sessionId, so it could only ever fire on
+  // mount, against values already at their initial state.
+  // If that key at the call site is ever removed, the reset has to come back.
 
   const submit = async () => {
     const t = text.trim();

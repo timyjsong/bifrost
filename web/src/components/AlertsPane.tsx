@@ -29,8 +29,7 @@ const SEV_TONE: Record<RecentAlert["severity"], "mute" | "gold" | "danger"> = {
   crit: "danger",
 };
 
-function RecentFeed({ alerts }: { alerts: RecentAlert[] }) {
-  const now = Date.now();
+function RecentFeed({ alerts, now }: { alerts: RecentAlert[]; now: number }) {
   return (
     <Panel className="mb-3">
       <div className="border-b border-line-soft px-4 py-2 text-[11px] uppercase tracking-[0.14em] text-ink-mute">
@@ -216,7 +215,7 @@ function EnableBar({
   return <span className="text-[12px] text-ink-mute">{msg[status]}</span>;
 }
 
-export function AlertsPane() {
+export function AlertsPane({ now }: { now: number }) {
   const [status, setStatus] = useState<PushStatus>("unsupported");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string>("");
@@ -301,7 +300,7 @@ export function AlertsPane() {
         </div>
       </Panel>
 
-      <RecentFeed alerts={recent} />
+      <RecentFeed alerts={recent} now={now} />
 
       {policy &&
         byTier.map((tier) => {

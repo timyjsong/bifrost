@@ -5,7 +5,7 @@ import { buildDiagnostics, type DiagTone } from "../lib/diagnostics";
 import { fetchParkStatus, summarizePark } from "../lib/park";
 import { Bar, Chip, Dot, Panel, SectionTitle, Stat } from "./ui";
 
-function ParkPanel() {
+function ParkPanel({ now }: { now: number }) {
   const [status, setStatus] = useState<ParkStatus | null>(null);
   useEffect(() => {
     const load = () => void fetchParkStatus().then(setStatus).catch(() => {});
@@ -16,7 +16,6 @@ function ParkPanel() {
   if (!status) return null;
 
   const sum = summarizePark(status.entries);
-  const now = Date.now();
   const windowH = Math.round(status.idleParkMs / 3_600_000);
   return (
     <Panel>
@@ -261,7 +260,7 @@ export function SystemPane({
         </div>
       )}
       <div className="mb-3">
-        <ParkPanel />
+        <ParkPanel now={now} />
       </div>
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
         <ClaudeProcs system={system} />

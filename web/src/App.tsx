@@ -347,7 +347,7 @@ function Dashboard() {
       ),
     },
     { id: "system", label: "System", alert: 0, node: <SystemPane system={snap.system} diagnostics={snap.diagnostics} now={now} /> },
-    { id: "alerts", label: "Alerts", alert: 0, node: <AlertsPane /> },
+    { id: "alerts", label: "Alerts", alert: 0, node: <AlertsPane now={now} /> },
     { id: "settings", label: "Settings", alert: 0, node: <SettingsPane /> },
     {
       id: "projects",
@@ -375,6 +375,7 @@ function Dashboard() {
         <DriveView
           key={driveSession.sessionId}
           session={driveSession}
+          now={now}
           onClose={() => setDriveSessionId(null)}
           onRestarted={openDrive}
         />

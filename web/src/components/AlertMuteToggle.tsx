@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { setSessionAlerts } from "../lib/push";
 
 /** Per-session alert mute. Optimistic: flips instantly, falls back to the
@@ -12,7 +12,14 @@ export function AlertMuteToggle({
   enabled: boolean;
 }) {
   const [optimistic, setOptimistic] = useState<boolean | null>(null);
-  useEffect(() => setOptimistic(null), [enabled]); // server caught up → drop the override
+  // Drop the override the moment the server agrees. Done during render against
+  // the previous prop rather than in an effect: an effect would paint one frame
+  // of the stale override first, and the toggle would visibly flicker back.
+  const [lastServer, setLastServer] = useState(enabled);
+  if (lastServer !== enabled) {
+    setLastServer(enabled);
+    setOptimistic(null);
+  }
   const on = optimistic ?? enabled;
   return (
     <button
