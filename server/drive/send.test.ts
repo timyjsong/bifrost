@@ -5,6 +5,11 @@ import { sendText, sendKey, viewportVerdict, MENU_COLS, MENU_ROWS } from "./send
 // Skipped where tmux isn't available so the suite still runs in bare CI.
 const SESSION = "bifrost-sendtest";
 
+/** `capture-pane -J` joins wrapped lines. Without it, a long shell prompt plus a
+ *  long payload wraps at the pane width and the capture comes back split, so a
+ *  verbatim-delivery assertion fails for a reason that has nothing to do with
+ *  delivery. CI runners have much longer prompts than a laptop, which is how this
+ *  surfaced there and not here. */
 async function tmuxOut(args: string[]): Promise<string> {
   const p = Bun.spawn(["tmux", ...args], { stdout: "pipe", stderr: "ignore" });
   await p.exited;
@@ -22,12 +27,12 @@ async function hasTmux(): Promise<boolean> {
  *  the caller's expect() reports the real content rather than a timeout. */
 async function paneUntil(
   match: (pane: string) => boolean,
-  timeoutMs = 10_000,
+  timeoutMs = 4_000,
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   let pane = "";
   for (;;) {
-    pane = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
+    pane = await tmuxOut(["capture-pane", "-p", "-J", "-t", SESSION]);
     if (match(pane) || Date.now() >= deadline) return pane;
     await Bun.sleep(25);
   }
@@ -35,7 +40,7 @@ async function paneUntil(
 
 async function fresh() {
   await tmuxOut(["kill-session", "-t", SESSION]);
-  await tmuxOut(["new-session", "-d", "-s", SESSION, "-x", "80", "-y", "24"]);
+  await tmuxOut(["new-session", "-d", "-s", SESSION, "-x", "200", "-y", "50"]);
   // Wait for a prompt, don't guess at one. A paste that lands before the shell's
   // readline is up is handled by the tty in canonical mode instead, so embedded
   // newlines execute line-by-line — precisely what the first test asserts must
