@@ -18,10 +18,32 @@ async function hasTmux(): Promise<boolean> {
     return false;
   }
 }
+/** Poll the pane until `match` holds, or give up and return the last capture so
+ *  the caller's expect() reports the real content rather than a timeout. */
+async function paneUntil(
+  match: (pane: string) => boolean,
+  timeoutMs = 10_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let pane = "";
+  for (;;) {
+    pane = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
+    if (match(pane) || Date.now() >= deadline) return pane;
+    await Bun.sleep(25);
+  }
+}
+
 async function fresh() {
   await tmuxOut(["kill-session", "-t", SESSION]);
   await tmuxOut(["new-session", "-d", "-s", SESSION, "-x", "80", "-y", "24"]);
-  await Bun.sleep(150);
+  // Wait for a prompt, don't guess at one. A paste that lands before the shell's
+  // readline is up is handled by the tty in canonical mode instead, so embedded
+  // newlines execute line-by-line — precisely what the first test asserts must
+  // NOT happen. A fixed sleep made that a race: the prompt takes ~140ms on a warm
+  // laptop and longer on a cold CI runner, so the suite passed locally and failed
+  // in CI on exactly those two assertions.
+  const ready = await paneUntil((p) => p.trim().length > 0);
+  if (!ready.trim()) throw new Error("tmux pane never showed a prompt");
 }
 
 const d = (await hasTmux()) ? describe : describe.skip;
@@ -34,16 +56,14 @@ d("send executor (throwaway tmux session)", () => {
   test("multi-line lands intact + un-submitted; a separate submit runs it", async () => {
     await fresh();
     await sendText(SESSION, "echo AAA\necho BBB\necho CCC", { submit: false });
-    await Bun.sleep(150);
-    const atPrompt = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
+    const atPrompt = await paneUntil((p) => p.includes("echo CCC"));
     expect(atPrompt).toContain("echo AAA");
     expect(atPrompt).toContain("echo BBB");
     expect(atPrompt).toContain("echo CCC");
     expect(atPrompt).not.toMatch(/^AAA$/m); // not executed yet
 
     await sendKey(SESSION, "Enter");
-    await Bun.sleep(250);
-    const afterRun = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
+    const afterRun = await paneUntil((p) => /^CCC$/m.test(p));
     expect(afterRun).toMatch(/^AAA$/m);
     expect(afterRun).toMatch(/^BBB$/m);
     expect(afterRun).toMatch(/^CCC$/m);
@@ -53,16 +73,14 @@ d("send executor (throwaway tmux session)", () => {
     await fresh();
     const tricky = "x=$(whoami); echo `id` && ${PATH} ;|&";
     await sendText(SESSION, tricky, { submit: false });
-    await Bun.sleep(150);
-    const pane = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
+    const pane = await paneUntil((p) => p.includes(tricky));
     expect(pane).toContain(tricky);
   });
 
   test("submit defaults on: a single line runs", async () => {
     await fresh();
     await sendText(SESSION, "echo ZZZ");
-    await Bun.sleep(250);
-    const pane = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
+    const pane = await paneUntil((p) => /^ZZZ$/m.test(p));
     expect(pane).toMatch(/^ZZZ$/m);
   });
 
@@ -73,10 +91,9 @@ d("send executor (throwaway tmux session)", () => {
   test("residual input is cleared before the next send (no concatenation)", async () => {
     await fresh();
     await sendText(SESSION, "echo OLDLINE", { submit: false });
-    await Bun.sleep(150);
+    await paneUntil((p) => p.includes("echo OLDLINE"));
     await sendText(SESSION, "echo NEWLINE", { submit: false });
-    await Bun.sleep(150);
-    const pane = await tmuxOut(["capture-pane", "-p", "-t", SESSION]);
+    const pane = await paneUntil((p) => p.includes("echo NEWLINE"));
     expect(pane).toContain("echo NEWLINE");
     // the smoking-gun concatenation the bug produced must never appear
     expect(pane).not.toContain("OLDLINEecho");
