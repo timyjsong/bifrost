@@ -28,7 +28,7 @@ The same session from a phone — the form factor the whole thing was built for:
 
 **Alerts and push.** A signal engine derives 13 tunable signals (session waiting, approval needed, memory pressure, service down, and so on) and maps them to Web Push notifications, which work away from your network. Session alerts deep-link into the drive view. Which units get watched is configuration, and an unconfigured install watches nothing rather than alerting about services it invented.
 
-**Search and history.** Sessions are indexed mtime-first and persisted across restarts, so a cold start doesn't re-parse the whole transcript pile. Name search filters the full uncapped set in memory on every keystroke. Pinning keeps a session surfaced past the history cutoff.
+**Search and history.** Sessions are indexed mtime-first and persisted across restarts, so a cold start doesn't re-parse the whole transcript pile. Searching by name filters the full uncapped set in memory on every keystroke — no I/O, so it runs as you type. Searching by *content* is a separate path: `grep -rilF` names candidate transcript files, then the newest candidates are scanned in-process for a readable snippet, and a hit only counts if the term appears in conversation text rather than buried in a tool payload. There is no search index and no database — the JSONL corpus is the store. Pinning keeps a session surfaced past the history cutoff.
 
 **Summaries.** One click summarizes a transcript using a background Claude session. A queue sized from the box's RAM keeps concurrent jobs bounded; results are cached until the transcript changes.
 
@@ -56,13 +56,13 @@ server/                Bun + TypeScript (run natively, no build step)
   spawn/               originate / resume / restart, spawn registry with a
                        per-session lock, memory gate, confinement
   lifecycle/           idle-park sweeper (ships disarmed)
-  search/              name search over the session index
+  search/              grep-backed conversation-content search
   sessions/            pins and history-cutoff bypass
   alerts/              signal derivation, alert engine, Web Push, VAPID keys
   auth/                request guard, tokens, enrollment, throttle + CLI
   files/               realpath-confined read-only browser
 web/                   Vite + React 19 + Tailwind v4 SPA
-shared/                one Snapshot type, used by both sides
+shared/                the Snapshot type + the alert-signal catalog, both sides
 phases/                the design docs each build was greenlit against
 deploy/bifrost.service systemd unit
 ```
@@ -79,7 +79,9 @@ The tests cover the logic layer: transcript parsing, state derivation, process a
 
 Coverage is uneven, and the distribution is worth stating rather than hiding behind the total. `bun test --coverage` reports about 90% of lines overall, but it is concentrated where the security and correctness decisions live: `server/auth/guard.ts` and `tokens.ts`, `server/derive.ts`, `server/files/confine.ts`, `server/spawn/{spawn,originate,resume,restart}.ts` and the pure web view-models (`selectors`, `cardModel`, `format`, `keymap`) are at or near 100%.
 
-It thins out fast outside that: `server/collectors/sessions.ts` — the largest file, and the one behind the transcript-plus-`/proc` claim — is around 53%, `server/spawn/memgate.ts` 75%, and on the web side the modules that are mostly network plumbing are barely covered at all (`web/src/lib/drive.ts` 33%, `push.ts` 27%, `api.ts` 3%). `server/index.ts` has no route tests and there are no component tests; the HTTP layer is verified by hand and presentation by eye. Route tests over the spawn and picker endpoints are the obvious next thing to write.
+It thins out fast outside that, and the thin parts are worth naming rather than leaving you to find them: `server/collectors/sessions.ts` — the largest file, and the one behind the transcript-plus-`/proc` claim — is around 53%, `server/collectors/system.ts` is 18%, `server/collectors/projects.ts` has no test file at all, `server/spawn/memgate.ts` is 75%, and on the web side the modules that are mostly network plumbing are barely covered (`web/src/lib/drive.ts` 33%, `push.ts` 27%, `api.ts` 3%). `server/index.ts` has no route tests and there are no component tests; the HTTP layer is verified by hand and presentation by eye.
+
+The pattern is that the *decisions* are tested and the *plumbing* mostly isn't. That is a defensible place to be while shipping, and an indefensible place to stay. Extracting the route table out of `server/index.ts` — 1,600 lines of inline path matching — is what makes route tests writable, so that is the next thing rather than more unit tests around the edges.
 
 ## Requirements
 
@@ -132,6 +134,8 @@ The code was written in Claude Code sessions and every commit carries a co-autho
 ## Status
 
 In daily use on my own box: the observe layer, driving existing tmux sessions, and the alert/push layer are all shipped and converged.
+
+With one caveat I'd rather state than have you find in the log. Driving converged in June and then silently stopped working on my own box after a tmux upgrade. tmux 3.6 replaces control characters with `_` in `-F` format output, and both tmux collectors used a tab as their field separator — so every row came back as one unsplittable field, both parsers returned zero rows, no process ever matched a pane, and every session read as "not tmux-resident." Nothing threw. The dashboard just quietly fell back to view-only and the System pane showed no tmux sessions. I caught it on 2026-07-30 while taking the screenshots above, because one of them showed that message on a session that obviously was tmux-resident. Fixed by moving to a separator tmux cannot mangle, with tests that pin the delimiter contract and carry the mangled line as a fixture. The lesson I'd take from it is that an integration whose failure mode is "returns empty" needs a test that would notice empty, which is now what those tests are.
 
 Session lifecycle — originate, resume, restart — is **built and green but its review cycle is still open**. The flows work and are covered by tests; what has not happened is my own final sign-off pass over them, so I am not calling that build converged. [`phases/02-start-restart.md`](phases/02-start-restart.md) says the same thing at the top of the file.
 
