@@ -43,31 +43,6 @@ export function projectSegment(path: string): string | null {
   return CONTAINERS.has(segs[0].toLowerCase()) ? (segs[1] ?? null) : segs[0];
 }
 
-/**
- * Directory names too ordinary to be evidence of anything.
- *
- * A machine can have a folder named after a common English word, and flagging
- * every prose use of it makes the guard unrunnable — which is worse than a gap,
- * because an unrunnable guard gets deleted. Distinctive names are what leak.
- */
-export const COMMON_WORDS = new Set([
-  "mobile", "desktop", "server", "client", "shared", "common", "public",
-  "private", "static", "assets", "images", "scripts", "styles", "config",
-  "backup", "temp", "tools", "utils", "vendor",
-  "docs", "data", "test", "tests", "build", "dist", "sandbox", "scratch",
-]);
-
-/**
- * Ordinary words that are ALSO real directories on the developer's machine.
- *
- * Declaring one suppresses the reality check for that name, so each entry is a
- * deliberate judgement that the word is too generic to disclose anything. The
- * list is short by design and a reviewer should push back on additions: a
- * distinctive name — hyphenated, or a coined word — does not belong here, and
- * `placeholders.test.ts` enforces that shape.
- */
-export const ACKNOWLEDGED = new Set(["mobile"]);
-
 /** Path segments that hold projects rather than being one. */
 export const CONTAINERS = new Set(["projects", "code", "work", "src", "tmp", "data"]);
 
