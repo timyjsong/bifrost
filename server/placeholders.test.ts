@@ -138,10 +138,10 @@ async function historyText(): Promise<string> {
   proc.stdin.write(blobs.join("\n") + "\n");
   proc.stdin.end();
   // latin1, not utf8: a binary decoded as utf8 turns into replacement
-  // characters and its embedded strings vanish. This keeps every byte legible
-  // as a character, which is all the patterns need.
+  // characters and its embedded strings vanish. Byte-per-character keeps them
+  // legible, which is all the patterns need.
   const buf = await new Response(proc.stdout).arrayBuffer();
-  const dumped = new TextDecoder("latin1").decode(buf);
+  const dumped = Buffer.from(buf).toString("latin1");
   await proc.exited;
   return dumped + "\n" + paths.join("\n");
 }
