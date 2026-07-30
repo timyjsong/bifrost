@@ -20,7 +20,7 @@ describe("sessionName (AC1.6)", () => {
 
 describe("matchRank — prefix vs mid-string vs miss", () => {
   test("prefix=0, substring=1, miss=-1, case-insensitive", () => {
-    expect(matchRank("Ledger", "mim")).toBe(0);
+    expect(matchRank("Ledger", "led")).toBe(0);
     expect(matchRank("demo-trader", "trade")).toBe(1);
     expect(matchRank("bifrost", "zzz")).toBe(-1);
     expect(matchRank("BIFROST", "bif")).toBe(0); // case-insensitive
@@ -36,7 +36,7 @@ describe("searchByName (AC1.6)", () => {
   ];
 
   test("case-insensitive substring match", () => {
-    const ids = searchByName(sessions, "MIM").map((x) => x.sessionId);
+    const ids = searchByName(sessions, "LEDG").map((x) => x.sessionId);
     expect(ids).toEqual(["3"]);
   });
 

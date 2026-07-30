@@ -23,8 +23,8 @@ const sess = (over: Partial<SessionInfo> & { sessionId: string }): SessionInfo =
 });
 
 const bifrost = proj({ path: "/home/you/code/bifrost" });
-const ledger-api = proj({ path: "/home/you/code/ledger-api" });
-const projects = [bifrost, ledger-api];
+const ledgerApi = proj({ path: "/home/you/code/ledger-api" });
+const projects = [bifrost, ledgerApi];
 
 describe("projectForSession (AC2.1) — cwd nests under its project", () => {
   test("cwd equal to project path matches", () => {
