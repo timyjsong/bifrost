@@ -78,17 +78,6 @@ async function allTrackedFiles(): Promise<string[]> {
 }
 
 /** Every commit message in the repo — the channel a tree scan cannot see. */
-/** The declared author identity, which is published on purpose. */
-async function gitAuthorName(): Promise<string> {
-  const proc = Bun.spawn(["git", "-C", repoRoot, "log", "-1", "--format=%an"], {
-    stdout: "pipe",
-    stderr: "ignore",
-  });
-  const out = await new Response(proc.stdout).text();
-  await proc.exited;
-  return out || "";
-}
-
 async function allCommitMessages(): Promise<string> {
   const proc = Bun.spawn(
     ["git", "-C", repoRoot, "log", "--all", "--format=%B%n%an%n%ae%n%cn%n%ce"],
