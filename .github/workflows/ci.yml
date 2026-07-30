@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Tests + typechecks + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned rather than `latest`: the suite is verified against this Bun, and a
+      # toolchain that moves on its own turns a green history into a false signal.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install (root)
+        run: bun install --frozen-lockfile
+
+      - name: Install (web)
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      # bun test + tsc on the server + tsc -b on the web app. Same command the
+      # working agreement requires green before any commit.
+      - name: bun run check
+        run: bun run check
+
+      - name: Lint (web)
+        working-directory: web
+        run: bunx eslint .
