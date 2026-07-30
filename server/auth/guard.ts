@@ -60,7 +60,7 @@ export function secureHostFrom(enrollUrl: string): string {
 // The ONE /api endpoint reachable without a token (besides health, handled
 // first). Enrollment must be pre-auth — it's how the first device gets a token —
 // but it still passes the Host/Origin allowlists below.
-const PREAUTH_API = new Set(["/api/enroll"]);
+export const PREAUTH_API = new Set(["/api/enroll"]);
 
 export function decide(i: GuardInput): GuardVerdict {
   // Health is a pure liveness probe (no sensitive data) — fully open, so a

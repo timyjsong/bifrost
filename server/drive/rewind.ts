@@ -83,11 +83,6 @@ export function parseRewindMenu(paneText: string): RewindMenu | null {
   return { checkpoints, cursorIndex };
 }
 
-/** How many Up (negative) / Down (positive) presses move cursor → target. */
-export function stepsToTarget(cursorIndex: number, targetIndex: number): number {
-  return targetIndex - cursorIndex;
-}
-
 /**
  * Resolve a peeked checkpoint against a freshly re-parsed picker by its identity
  * (label + detail), not the peek-time index — the list can grow between peek and

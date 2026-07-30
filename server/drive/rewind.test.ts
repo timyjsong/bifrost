@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseRewindMenu, stepsToTarget, rewindIndexByIdentity } from "./rewind";
+import { parseRewindMenu, rewindIndexByIdentity } from "./rewind";
 
 // The chrome as captured live (2026-07-02) — the contract fixture.
 const LIVE_MENU = [
@@ -36,14 +36,6 @@ describe("parseRewindMenu — the live-captured chrome", () => {
   test("a pane without the rewind chrome returns null (loud fallback)", () => {
     expect(parseRewindMenu("just a conversation\n❯ \n← for agents")).toBeNull();
     expect(parseRewindMenu("")).toBeNull();
-  });
-});
-
-describe("stepsToTarget", () => {
-  test("negative = Up presses, positive = Down", () => {
-    expect(stepsToTarget(2, 0)).toBe(-2);
-    expect(stepsToTarget(0, 1)).toBe(1);
-    expect(stepsToTarget(1, 1)).toBe(0);
   });
 });
 

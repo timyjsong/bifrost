@@ -29,15 +29,16 @@ import {
 import { transcriptPathFor, transcriptMtimeFor, sessionIndexEntries } from "./collectors/sessions";
 import { setSessionPin } from "./sessions/pins";
 import { searchTranscriptsSerialized } from "./search/transcripts";
-import { parseRewindMenu, stepsToTarget, rewindIndexByIdentity } from "./drive/rewind";
+import { parseRewindMenu, rewindIndexByIdentity } from "./drive/rewind";
 import { sessionDiff } from "./drive/diff";
 import { sessionStream } from "./drive/live";
 import { resolveTarget, liveTmuxSet } from "./drive/target";
-import { sendText, sendKey, capturePane, ensureMenuViewport, pollPane } from "./drive/send";
+import { sendText, sendKey, capturePane } from "./drive/send";
 import { parseModelMenu, isModelConfirm, modelIndexByLabel } from "./drive/model";
 import { parseEffortSlider, effortIndexByValue } from "./drive/effort";
-import { closePicker } from "./drive/picker";
-import { withPickerLock, pickerIdle } from "./drive/pickerFlow";
+import { runPickerRoute, type PaneIO } from "./drive/pickerRoute";
+import { compileRoutes, matchRoute } from "./routes/table";
+import { API, type RouteName } from "./routes/api";
 import {
   readEffortLevel,
   restoreEffortLevel,
@@ -538,8 +539,26 @@ function preflight(origin: string | null): Response {
 
 // ---- routing (reached only AFTER the auth gate admits the request) --------
 
-async function route(req: Request, url: URL, now: number, ip: string): Promise<Response> {
-  if (url.pathname === "/api/enroll" && req.method === "POST") {
+/**
+ * The API surface, in order. Matching is `routes/table.ts` — first match wins,
+ * a method mismatch falls through rather than 405-ing, and a param that fails
+ * its `where` constraint falls through too, exactly as the old if-chain did.
+ */
+interface Ctx {
+  req: Request;
+  url: URL;
+  now: number;
+  ip: string;
+  params: Record<string, string>;
+}
+type Handler = (c: Ctx) => Promise<Response>;
+
+/**
+ * One handler per declared route. The Record type is exhaustive over RouteName,
+ * so a route added to routes/api.ts without a handler here fails to compile.
+ */
+const HANDLERS: Record<RouteName, Handler> = {
+  enroll: async ({ req, now, ip }) => {
     const body = (await req.json().catch(() => ({}))) as {
       code?: unknown;
       label?: unknown;
@@ -552,23 +571,17 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     }
     const token = await mintToken(label, now);
     return Response.json({ token });
-  }
-  if (url.pathname === "/api/state") {
+  },
+  state: async (_c) => {
     return Response.json(snapshot);
-  }
-  // The full *uncapped* session index for the project-centric list's name search
-  // (story 2-2 / AC2.2). Shipped once; the client matches in-memory per keystroke
-  // (no network round-trip). Liveness is the snapshot's current live set.
-  if (url.pathname === "/api/session-index") {
+  },
+  sessionIndex: async (_c) => {
     const liveIds = new Set(
       snapshot.sessions.filter((s) => s.live).map((s) => s.sessionId),
     );
     return Response.json({ entries: sessionIndexEntries(liveIds) });
-  }
-  // Toggle a session's pin (story 2-2 / AC2.3) — mirrors POST /api/alerts/session.
-  // A pinned session renders even past the historyDays / maxHistory cutoffs; the
-  // collector reads this store each tick and rescues pinned-but-dropped ids.
-  if (url.pathname === "/api/sessions/pin" && req.method === "POST") {
+  },
+  sessionsPin: async ({ req }) => {
     const body = (await req.json().catch(() => null)) as
       | { sessionId?: string; pinned?: boolean }
       | null;
@@ -577,45 +590,36 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     }
     await setSessionPin(body.sessionId, body.pinned);
     return Response.json({ ok: true });
-  }
-  const sumMatch = url.pathname.match(
-    /^\/api\/sessions\/([0-9a-f-]{36})\/summarize$/,
-  );
-  if (sumMatch && req.method === "POST") {
+  },
+  summarize: async ({ params }) => {
     try {
-      const result = await summarizeSession(cfg, sumMatch[1]);
+      const result = await summarizeSession(cfg, params.id);
       return Response.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const status = message === "unknown session" ? 404 : 500;
       return Response.json({ error: message }, { status });
     }
-  }
-  if (url.pathname.startsWith("/api/push/") || url.pathname.startsWith("/api/alerts/")) {
-    const res = await handleAlertRequest(req, url);
-    if (res) return res;
-  }
-  if (url.pathname === "/api/files") {
+  },
+  files: async ({ url }) => {
     // Roots are the live project dirs — you can only browse INTO a project the
     // dashboard already shows, never the realm above it or anything outside.
     const res = await handleFilesRequest(url, projects.map((p) => p.path));
     if (res) return res;
-  }
-  if (url.pathname === "/api/dirs") {
+    return serveStatic(url.pathname); // declined — fall through, as before
+  },
+  dirs: async ({ url }) => {
     // The originate picker's directory browser — home-rooted, the same bound
     // the spawn cwd guard enforces on the chosen folder.
     const res = await handleDirsRequest(url, homedir());
     if (res) return res;
-  }
-  if (url.pathname === "/api/events") {
+    return serveStatic(url.pathname); // declined — fall through, as before
+  },
+  events: async ({ req }) => {
     return sseResponse(req.headers.get("x-bifrost-token"));
-  }
-  // Per-session live drive stream (Build 1 / M2). The id is only a map key into
-  // the collector's tracked sessions — it never touches the filesystem as a path,
-  // so there's no traversal surface; an unknown session is a 404.
-  const sessMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/events$/);
-  if (sessMatch) {
-    const sid = decodeURIComponent(sessMatch[1]);
+  },
+  sessionEvents: async ({ req, url, params }) => {
+    const sid = params.id;
     // A freshly spawned session has no transcript until its first turn — it is
     // still a real, driveable session (surfaced via its pid-file), so the
     // stream opens with an empty state and adopts the file when it appears.
@@ -635,13 +639,9 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       undefined,
       since,
     );
-  }
-  // Send a prompt into a session (Channel 2). The target is re-validated at send
-  // time against the LIVE tmux set, so a non-injectable or vanished session fails
-  // loud (409) rather than misdirecting. No content filter — "anything typeable".
-  const promptMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/prompt$/);
-  if (promptMatch && req.method === "POST") {
-    const sid = decodeURIComponent(promptMatch[1]);
+  },
+  prompt: async ({ req, params }) => {
+    const sid = params.id;
     const body = (await req.json().catch(() => ({}))) as { text?: unknown };
     const text = typeof body.text === "string" ? body.text : "";
     if (!text.trim()) return Response.json({ ok: false, reason: "empty" }, { status: 400 });
@@ -685,21 +685,13 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       }
     });
     return Response.json({ ok: true, delayMs: sendDelayMs, fireAt });
-  }
-  // Cancel a parked send within its grace window (the "undo"). `cancelled:false`
-  // means nothing was pending (already fired in the race) — the client then
-  // treats it as sent rather than restoring the text.
-  const cancelMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/prompt\/cancel$/);
-  if (cancelMatch && req.method === "POST") {
-    const sid = decodeURIComponent(cancelMatch[1]);
+  },
+  promptCancel: async ({ params }) => {
+    const sid = params.id;
     return Response.json({ ok: true, cancelled: cancelSend(sid) });
-  }
-  // Interrupt a running turn (M4). Sends Esc — never Ctrl-C (which would exit the
-  // session). The UI only exposes this while the session is working, so it can't
-  // be mis-fired when there's nothing to stop.
-  const interruptMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/interrupt$/);
-  if (interruptMatch && req.method === "POST") {
-    const sid = decodeURIComponent(interruptMatch[1]);
+  },
+  interrupt: async ({ params }) => {
+    const sid = params.id;
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
     if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
@@ -709,12 +701,9 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
     }
     return Response.json({ ok: true });
-  }
-  // Channel 3 — read the live pane for a pending permission menu (+ a raw tail for
-  // the loud fallback when the menu can't be parsed). Polled by the drive view.
-  const paneMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/pane$/);
-  if (paneMatch && req.method === "GET") {
-    const sid = decodeURIComponent(paneMatch[1]);
+  },
+  pane: async ({ now, params }) => {
+    const sid = params.id;
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
     if (!tgt.ok)
@@ -753,13 +742,9 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       // renders nothing for it); an empty capture stays null (unknown).
       mode: modeFromPane(raw),
     });
-  }
-  // Set the permission mode (auto / accept-edits / plan) by injecting Shift+Tab
-  // cycles. Reads the current mode off the pane, computes the press count, sends
-  // them. Bypass is launch-only (not in the TUI cycle) — rejected here.
-  const modeMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/mode$/);
-  if (modeMatch && req.method === "POST") {
-    const sid = decodeURIComponent(modeMatch[1]);
+  },
+  mode: async ({ req, params }) => {
+    const sid = params.id;
     const body = (await req.json().catch(() => ({}))) as { mode?: unknown };
     const target = body.mode;
     if (target !== "auto" && target !== "accept-edits" && target !== "plan")
@@ -792,12 +777,9 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
     if (cur !== target)
       return Response.json({ ok: false, reason: "mode-switch-failed", mode: cur }, { status: 502 });
     return Response.json({ ok: true, mode: cur });
-  }
-  // Answer a permission menu — a deliberately tiny surface (a digit or Enter),
-  // validated, then routed as a key. A bad key is rejected, never sent.
-  const answerMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/answer$/);
-  if (answerMatch && req.method === "POST") {
-    const sid = decodeURIComponent(answerMatch[1]);
+  },
+  answer: async ({ req, params }) => {
+    const sid = params.id;
     const body = (await req.json().catch(() => ({}))) as { key?: unknown };
     const key = typeof body.key === "string" ? body.key : "";
     if (!isValidAnswerKey(key))
@@ -811,12 +793,9 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
     }
     return Response.json({ ok: true });
-  }
-  // Raw pane mirror (M6) — the full pane WITH colour escapes, for the xterm.js
-  // fallback. Polled by the raw terminal view.
-  const captureMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/capture$/);
-  if (captureMatch && req.method === "GET") {
-    const sid = decodeURIComponent(captureMatch[1]);
+  },
+  capture: async ({ params }) => {
+    const sid = params.id;
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
     if (!tgt.ok) return Response.json({ text: "" });
@@ -827,22 +806,15 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       /* pane vanished */
     }
     return Response.json({ text });
-  }
-  // Slash-command suggestions (M7) — disk-scanned (user/project/skills) + static
-  // built-ins, for the session's cwd. Non-authoritative; the client filters.
-  const slashMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/slash$/);
-  if (slashMatch && req.method === "GET") {
-    const sid = decodeURIComponent(slashMatch[1]);
+  },
+  slash: async ({ now, params }) => {
+    const sid = params.id;
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     if (!sess) return Response.json({ commands: [] });
     return Response.json({ commands: await slashFor(cfg.claudeDir, sess.cwd, now) });
-  }
-  // Session diff — the review spine: cumulative working-tree diff of the
-  // session's cwd (tracked changes vs HEAD). Read-only git; the cwd comes
-  // from the session record, never the client.
-  const diffMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/diff$/);
-  if (diffMatch && req.method === "GET") {
-    const sid = decodeURIComponent(diffMatch[1]);
+  },
+  diff: async ({ params }) => {
+    const sid = params.id;
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     if (!sess?.cwd) return Response.json({ git: false });
     const d = await sessionDiff(sess.cwd, async (argv, cwd) => {
@@ -858,293 +830,159 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       }
     });
     return Response.json(d);
-  }
-  // Rewind (checkpoints, 2-stage): open = Esc-Esc → parse the picker; select =
-  // closed-loop arrows to the target row + Enter — the numbered confirm that
-  // follows arrives through the NORMAL pane poll (parsePermissionMenu handles
-  // it) and is answered via the existing /answer route. Unparseable chrome
-  // returns menu-unreadable and closes the picker — never a guessed keystroke.
-  const rewindMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/rewind\/(open|select|cancel)$/);
-  if (rewindMatch && req.method === "POST") {
-    const sid = decodeURIComponent(rewindMatch[1]);
-    const action = rewindMatch[2];
+  },
+  rewind: async ({ req, params }) => {
+    const sid = params.id;
+    const action = params.action;
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
     if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
     const target = tgt.tmuxSession;
-    const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-    // Open the Esc-Esc rewind picker and parse it (shared by peek and commit).
-    // A small window clips the header/footer, so restore the spawn size first;
-    // a window pinned small by a LIVE attach fails honestly. On parse failure it
-    // closes whatever opened and returns a reason (never a stranded picker).
-    const openRewindPicker = async () => {
-      const roomy = await ensureMenuViewport(target);
-      await sendKey(target, "Escape");
-      await pause(350);
-      await sendKey(target, "Escape");
-      await pause(350);
-      const menu = await pollPane(async () => parseRewindMenu(await capturePane(target)));
-      if (!menu) {
-        await closePicker(target);
-        return { reason: roomy ? "menu-unreadable" : "attached-small" } as const;
-      }
-      return { menu } as const;
+    // Esc-Esc is the rewind gesture; the two presses need a beat between them.
+    const openSpec = {
+      trigger: async (t: string, io: PaneIO) => {
+        await io.key(t, "Escape");
+        await io.sleep(350);
+        await io.key(t, "Escape");
+      },
+      parse: parseRewindMenu,
     };
-    // Serialize every picker op for this session so a release Esc and a later
-    // commit/cancel Esc can't interleave into the TUI's Esc-Esc rewind gesture.
-    return withPickerLock(sid, async () => {
-      try {
-        if (action === "cancel") {
-          // Esc only if a picker is actually open — footer-gated, so a bare
-          // prompt / thinking turn is never touched (drive/picker.ts).
-          await closePicker(target);
-          return Response.json({ ok: true });
-        }
-        // Never open a picker on a mid-turn session (an Esc would interrupt it).
-        if (!(await pickerIdle(target)))
-          return Response.json({ ok: false, reason: "busy" }, { status: 409 });
-        if (action === "open") {
-          // PEEK then RELEASE: read the checkpoints and immediately close the
-          // picker, so backing out of the UI mid-flow strands nothing.
-          const r = await openRewindPicker();
-          if ("reason" in r) return Response.json({ ok: false, reason: r.reason }, { status: 409 });
-          await closePicker(target); // release
-          return Response.json({ ok: true, ...r.menu });
-        }
-        // COMMIT — re-open, resolve the chosen checkpoint by IDENTITY (the list
-        // can have grown since the peek; rewind is destructive so a stale index
-        // must never restore the wrong point), drive to it, Enter. The numbered
-        // confirm that follows arrives via the normal pane poll / /answer route.
-        const body = (await req.json().catch(() => ({}))) as { label?: unknown; detail?: unknown };
-        if (typeof body.label !== "string" || typeof body.detail !== "string")
-          return Response.json({ ok: false, reason: "bad-choice" }, { status: 400 });
-        const r = await openRewindPicker();
-        if ("reason" in r) return Response.json({ ok: false, reason: r.reason }, { status: 409 });
-        const idx = rewindIndexByIdentity(r.menu.checkpoints, {
-          label: body.label,
-          detail: body.detail,
-        });
-        if (idx < 0) {
-          await closePicker(target); // release — the checkpoint is gone or ambiguous
-          return Response.json({ ok: false, reason: "gone" }, { status: 409 });
-        }
-        for (let tries = 0; tries < 30; tries++) {
-          const menu = parseRewindMenu(await capturePane(target));
-          if (!menu) return Response.json({ ok: false, reason: "menu-unreadable" }, { status: 409 });
-          if (idx >= menu.checkpoints.length) {
-            await closePicker(target);
-            return Response.json({ ok: false, reason: "gone" }, { status: 409 });
-          }
-          const steps = stepsToTarget(menu.cursorIndex, idx);
-          if (steps === 0) {
-            await sendKey(target, "Enter");
-            return Response.json({ ok: true });
-          }
-          await sendKey(target, steps < 0 ? "Up" : "Down");
-          await pause(200);
-        }
-        return Response.json({ ok: false, reason: "cursor-stuck" }, { status: 502 });
-      } catch {
-        return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
-      }
+    return runPickerRoute({
+      sessionId: sid,
+      target,
+      action,
+      req,
+      openSpec,
+      drive: {
+        parse: parseRewindMenu,
+        count: (m) => m.checkpoints.length,
+        cursor: (m) => m.cursorIndex,
+        navKeys: ["Up", "Down"],
+      },
+      choice: (body) => {
+        const b = body as { label?: unknown; detail?: unknown };
+        return typeof b.label === "string" && typeof b.detail === "string"
+          ? { label: b.label, detail: b.detail }
+          : null;
+      },
+      // Resolve by IDENTITY, not the peek-time index: the list can have grown
+      // since the peek, and rewind is destructive, so a stale index must never
+      // restore the wrong point. Ambiguous matches refuse too (see rewind.ts).
+      locate: (menu, id) => rewindIndexByIdentity(menu.checkpoints, id),
+      // The numbered confirm that follows arrives through the NORMAL pane poll
+      // (parsePermissionMenu handles it) and is answered via the /answer route.
+      confirm: async ({ target: t, io }) => {
+        await io.key(t, "Enter");
+        return Response.json({ ok: true });
+      },
+      stuckReason: "cursor-stuck",
     });
-  }
-  // Model switching — drive the TUI's /model picker. THE CONTRACT: only ever
-  // confirm with "s" (use for THIS SESSION only) — Enter would persist the pick
-  // as the ACCOUNT default, which Bifrost must never touch. The options come
-  // from the live picker, so new models appear without a code change.
-  const modelMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/model\/(open|select|cancel)$/);
-  if (modelMatch && req.method === "POST") {
-    const sid = decodeURIComponent(modelMatch[1]);
-    const action = modelMatch[2];
+  },
+  model: async ({ req, params }) => {
+    const sid = params.id;
+    const action = params.action;
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
     if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
     const target = tgt.tmuxSession;
-    const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-    // Open the /model picker and parse it (shared by peek and commit). On parse
-    // failure it closes whatever opened and returns a reason — never a strand.
-    const openModelPicker = async () => {
-      const roomy = await ensureMenuViewport(target);
-      await sendText(target, "/model"); // clears residual input first
-      await pause(350);
-      const menu = await pollPane(async () => parseModelMenu(await capturePane(target)));
-      if (!menu) {
-        await closePicker(target);
-        return { reason: roomy ? "menu-unreadable" : "attached-small" } as const;
-      }
-      return { menu } as const;
-    };
-    return withPickerLock(sid, async () => {
-      try {
-        if (action === "cancel") {
-          await closePicker(target); // footer-gated — never Escs a bare prompt
-          return Response.json({ ok: true });
-        }
-        if (!(await pickerIdle(target)))
-          return Response.json({ ok: false, reason: "busy" }, { status: 409 });
-        if (action === "open") {
-          // PEEK then RELEASE — the picker never sits open waiting on the human.
-          const r = await openModelPicker();
-          if ("reason" in r) return Response.json({ ok: false, reason: r.reason }, { status: 409 });
-          await closePicker(target); // release
-          return Response.json({ ok: true, ...r.menu });
-        }
-        // COMMIT — re-open, resolve the chosen row by LABEL (index can shift),
-        // closed-loop to it, then "s" (session-only — NEVER Enter, which would
-        // persist the ACCOUNT default), then answer the cache-cost confirm.
-        const body = (await req.json().catch(() => ({}))) as { label?: unknown };
-        if (typeof body.label !== "string")
-          return Response.json({ ok: false, reason: "bad-choice" }, { status: 400 });
-        const r = await openModelPicker();
-        if ("reason" in r) return Response.json({ ok: false, reason: r.reason }, { status: 409 });
-        const idx = modelIndexByLabel(r.menu.options, body.label);
-        if (idx < 0) {
-          await closePicker(target); // release — the model is no longer offered
-          return Response.json({ ok: false, reason: "gone" }, { status: 409 });
-        }
-        let confirmed = false;
-        for (let tries = 0; tries < 30; tries++) {
-          const raw = await capturePane(target);
-          if (confirmed) {
-            if (isModelConfirm(raw)) {
-              await sendKey(target, "1"); // Yes, switch
-              await pause(400);
-              continue;
-            }
-            if (!parseModelMenu(raw)) return Response.json({ ok: true }); // picker gone
-            await pause(300);
+    return runPickerRoute({
+      sessionId: sid,
+      target,
+      action,
+      req,
+      openSpec: {
+        trigger: (t, io) => io.text(t, "/model"), // sendText clears residual input
+        parse: parseModelMenu,
+      },
+      drive: {
+        parse: parseModelMenu,
+        count: (m) => m.options.length,
+        cursor: (m) => m.cursorIndex,
+        navKeys: ["Up", "Down"],
+      },
+      choice: (body) => {
+        const b = body as { label?: unknown };
+        return typeof b.label === "string" ? b.label : null;
+      },
+      // By LABEL, not the peek-time index — the offered list can shift.
+      locate: (menu, label) => modelIndexByLabel(menu.options, label),
+      // THE CONTRACT: confirm with "s" (this session only). Enter here would
+      // persist the pick as the ACCOUNT default, which Bifrost must never touch.
+      // Then answer the cache-cost "Switch model?" dialog that follows.
+      confirm: async ({ target: t, io, budget }) => {
+        await io.key(t, "s");
+        await io.sleep(400);
+        while (budget.left > 0) {
+          budget.left--;
+          const raw = await io.capture(t);
+          if (isModelConfirm(raw)) {
+            await io.key(t, "1"); // Yes, switch
+            await io.sleep(400);
             continue;
           }
-          const menu = parseModelMenu(raw);
-          if (!menu) return Response.json({ ok: false, reason: "menu-unreadable" }, { status: 409 });
-          if (idx >= menu.options.length) {
-            await closePicker(target);
-            return Response.json({ ok: false, reason: "gone" }, { status: 409 });
-          }
-          const steps = stepsToTarget(menu.cursorIndex, idx);
-          if (steps === 0) {
-            await sendKey(target, "s"); // session only — NEVER Enter here
-            confirmed = true;
-            await pause(400);
-            continue;
-          }
-          await sendKey(target, steps < 0 ? "Up" : "Down");
-          await pause(200);
+          if (!parseModelMenu(raw)) return Response.json({ ok: true }); // picker gone
+          await io.sleep(300);
         }
         return Response.json({ ok: false, reason: "confirm-stuck" }, { status: 502 });
-      } catch {
-        return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
-      }
+      },
+      stuckReason: "confirm-stuck",
     });
-  }
-  // Effort switching — the TUI's /effort slider driven server-side. Verified
-  // live: Enter is session-scoped (the account settings file is untouched).
-  const effortMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/effort\/(open|select|cancel)$/);
-  if (effortMatch && req.method === "POST") {
-    const sid = decodeURIComponent(effortMatch[1]);
-    const action = effortMatch[2];
+  },
+  effort: async ({ req, params }) => {
+    const sid = params.id;
+    const action = params.action;
     const sess = snapshot.sessions.find((s) => s.sessionId === sid);
     const tgt = resolveTarget(sess, liveTmuxSet(snapshot.system.tmux));
     if (!tgt.ok) return Response.json({ ok: false, reason: tgt.reason }, { status: 409 });
     const target = tgt.tmuxSession;
-    const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-    // Open the /effort slider and parse it (shared by peek and commit). On parse
-    // failure it closes whatever opened and returns a reason (incl. the
-    // effort-unsupported case) — never a strand.
-    const openEffortSlider = async () => {
-      const roomy = await ensureMenuViewport(target);
-      await sendText(target, "/effort"); // clears residual input first
-      await pause(350);
-      const slider = await pollPane(async () => parseEffortSlider(await capturePane(target)));
-      if (!slider) {
-        const raw = await capturePane(target);
-        await closePicker(target);
-        const reason = /not supported/i.test(raw)
-          ? "effort-unsupported"
-          : roomy
-            ? "menu-unreadable"
-            : "attached-small";
-        return { reason } as const;
-      }
-      return { slider } as const;
-    };
-    return withPickerLock(sid, async () => {
-      try {
-        if (action === "cancel") {
-          await closePicker(target); // footer-gated — never Escs a bare prompt
-          return Response.json({ ok: true });
+    return runPickerRoute({
+      sessionId: sid,
+      target,
+      action,
+      req,
+      openSpec: {
+        trigger: (t, io) => io.text(t, "/effort"), // sendText clears residual input
+        parse: parseEffortSlider,
+        unsupported: /not supported/i,
+      },
+      drive: {
+        parse: parseEffortSlider,
+        count: (s) => s.options.length,
+        cursor: (s) => s.currentIndex,
+        navKeys: ["Left", "Right"],
+      },
+      choice: (body) => {
+        const b = body as { value?: unknown };
+        return typeof b.value === "string" ? b.value : null;
+      },
+      locate: (slider, value) => effortIndexByValue(slider.options, value),
+      // The confirm latches the SESSION's effort but ALSO side-writes the account
+      // default ("saved as your default for new sessions") — verified live.
+      // Bifrost's control is session-scoped: restore the default we read
+      // beforehand iff the write was ours (see drive/effortDefault.ts).
+      confirm: async ({ target: t, io, picker, index }) => {
+        const prior = await readEffortLevel(cfg.claudeDir);
+        await io.key(t, "Enter");
+        await io.sleep(800);
+        const after = await readEffortLevel(cfg.claudeDir);
+        if (shouldRestoreEffortDefault(prior, after, picker.options[index])) {
+          await restoreEffortLevel(cfg.claudeDir, prior!);
         }
-        if (!(await pickerIdle(target)))
-          return Response.json({ ok: false, reason: "busy" }, { status: 409 });
-        if (action === "open") {
-          // PEEK then RELEASE — the slider never sits open waiting on the human.
-          const r = await openEffortSlider();
-          if ("reason" in r) return Response.json({ ok: false, reason: r.reason }, { status: 409 });
-          await closePicker(target); // release
-          return Response.json({ ok: true, ...r.slider });
-        }
-        // COMMIT — re-open, resolve the chosen stop by its LABEL (index can
-        // shift), ←/→ to it, then Enter.
-        const body = (await req.json().catch(() => ({}))) as { value?: unknown };
-        if (typeof body.value !== "string")
-          return Response.json({ ok: false, reason: "bad-choice" }, { status: 400 });
-        const r = await openEffortSlider();
-        if ("reason" in r) return Response.json({ ok: false, reason: r.reason }, { status: 409 });
-        const idx = effortIndexByValue(r.slider.options, body.value);
-        if (idx < 0) {
-          await closePicker(target); // release — the stop is no longer offered
-          return Response.json({ ok: false, reason: "gone" }, { status: 409 });
-        }
-        for (let tries = 0; tries < 30; tries++) {
-          const slider = parseEffortSlider(await capturePane(target));
-          if (!slider)
-            return Response.json({ ok: false, reason: "menu-unreadable" }, { status: 409 });
-          if (idx >= slider.options.length) {
-            await closePicker(target);
-            return Response.json({ ok: false, reason: "gone" }, { status: 409 });
-          }
-          const steps = stepsToTarget(slider.currentIndex, idx);
-          if (steps === 0) {
-            // The confirm latches the SESSION's effort but ALSO side-writes the
-            // account default ("saved as your default for new sessions") —
-            // verified live. Bifrost's control is session-scoped: restore the
-            // default we read beforehand iff the write was ours (see
-            // drive/effortDefault.ts).
-            const prior = await readEffortLevel(cfg.claudeDir);
-            await sendKey(target, "Enter");
-            await pause(800);
-            const now = await readEffortLevel(cfg.claudeDir);
-            if (shouldRestoreEffortDefault(prior, now, slider.options[idx])) {
-              await restoreEffortLevel(cfg.claudeDir, prior!);
-            }
-            return Response.json({ ok: true });
-          }
-          await sendKey(target, steps < 0 ? "Left" : "Right");
-          await pause(200);
-        }
-        return Response.json({ ok: false, reason: "cursor-stuck" }, { status: 502 });
-      } catch {
-        return Response.json({ ok: false, reason: "send-failed" }, { status: 502 });
-      }
+        return Response.json({ ok: true });
+      },
+      stuckReason: "cursor-stuck",
     });
-  }
-  // Conversation search — grep-over-files across every transcript (no index,
-  // no DB). Fixed-string, never a shell; bounded server-side (newest-first,
-  // scan + result caps). Behind the global auth gate like every /api route.
-  if (url.pathname === "/api/search" && req.method === "GET") {
+  },
+  search: async ({ url }) => {
     const q = (url.searchParams.get("q") ?? "").trim();
     if (q.length < 3) return Response.json({ hits: [] });
     const hits = await searchTranscriptsSerialized(q, {
       projectsDir: join(cfg.claudeDir, "projects"),
     });
     return Response.json({ hits });
-  }
-  // Cross-device prompt draft: the uncommitted input buffer, server-side per
-  // session so it follows the user across devices.
-  const draftMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/draft$/);
-  if (draftMatch) {
-    const sid = decodeURIComponent(draftMatch[1]);
+  },
+  draft: async ({ req, url, params }) => {
+    const sid = params.id;
     if (req.method === "GET")
       return Response.json({ text: await getDraft(sid), sendFailure: sendFailure(sid) });
     if (req.method === "PUT") {
@@ -1153,14 +991,10 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       await setDraft(sid, text);
       return Response.json({ ok: true });
     }
-  }
-  // Attach files (drive composer). The TUI can't take binaries, so each file is
-  // saved under the gitignored data/uploads/<sessionId>/ and its PATH returned;
-  // the client injects the path(s) into the prompt for Claude to read. TTL-swept
-  // on each upload. Behind the global auth gate like every /api route.
-  const uploadMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/upload$/);
-  if (uploadMatch && req.method === "POST") {
-    const sid = decodeURIComponent(uploadMatch[1]);
+    return serveStatic(url.pathname); // unreachable: method is constrained
+  },
+  upload: async ({ req, now, params }) => {
+    const sid = params.id;
     const form = await req.formData().catch(() => null);
     if (!form) return Response.json({ ok: false, reason: "bad-form" }, { status: 400 });
     await sweepUploads(now); // TTL-clean older uploads whenever a new one lands
@@ -1173,13 +1007,8 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       files.push({ path: saved.path, name: value.name }); // show the original name; path stays unique
     }
     return Response.json({ ok: true, files });
-  }
-  // App settings (currently the send grace period). Behind the global auth gate
-  // like every /api route. GET reads, PUT merges a partial patch and echoes back.
-  // Idle-park observe surface — the arming-readiness evidence (the sweeper
-  // logs what it WOULD park while disarmed). Read-only; arming stays my gate
-  // (lifecycle.enabled in the config file), never toggled from the UI.
-  if (url.pathname === "/api/lifecycle/park" && req.method === "GET") {
+  },
+  lifecyclePark: async (_c) => {
     const [entries, parked] = await Promise.all([readParkLog(50), readParked()]);
     return Response.json({
       enabled: cfg.lifecycle.enabled,
@@ -1187,21 +1016,16 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       entries,
       parkedCount: Object.keys(parked).length,
     });
-  }
-
-  if (url.pathname === "/api/settings") {
+  },
+  settings: async ({ req, url }) => {
     if (req.method === "GET") return Response.json(await getSettings());
     if (req.method === "PUT") {
       const body = (await req.json().catch(() => ({}))) as Partial<Settings>;
       return Response.json(await setSettings(body));
     }
-  }
-  // Originate — start a fresh session from Bifrost (story 2-5). A tiny validated
-  // surface behind the same bearer gate every /api route sits behind: bad
-  // model/cwd/name → 400 (no spawn); the memory gate (2-4) runs first; on proceed
-  // the registry/spawn lifecycle (2-3/2-4) runs; "ready" gates on DRIVE-confirm
-  // (AC5.4), not boot-confirm. No step-up auth — the device token is the boundary.
-  if (url.pathname === "/api/originate" && req.method === "POST") {
+    return serveStatic(url.pathname); // unreachable: method is constrained
+  },
+  originate: async ({ req, now, ip }) => {
     // Resource guard: cap NEW-process spawns per window (a leaked/shared token
     // or runaway client must not storm the box). Not an auth decision — a cost
     // ceiling; single-user tailnet installs never reach it.
@@ -1273,21 +1097,12 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
       caution: outcome.caution,
       driveable: drive.drivable,
     });
-  }
-  // Resume — bring an inactive session live from its view-only transcript (2-6).
-  // The whole check→claim→spawn→confirm runs under the per-uuid lock; a concurrent
-  // same-uuid resume is 409 "already starting" (AC6.2). The gate keys on a POSITIVE
-  // not-live signal taken FRESH here (sessions dir + /proc + live tmux set), never
-  // the tick snapshot (AC6.1); an already-live session routes to drive, never a
-  // second claude (AC6.3); the launch cd's to the transcript's read-back cwd, and a
-  // missing cwd is surfaced "degraded" not launched (AC6.4). Any directory resumes
-  // (AC6.5) — no home-root confine.
-  const resumeMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/resume$/);
-  if (resumeMatch && req.method === "POST") {
+  },
+  resume: async ({ now, ip, params }) => {
     if (spawnLimited(ip, now))
       return Response.json({ ok: false, reason: "rate-limited" }, { status: 429 });
     recordSpawn(ip, now);
-    const uuid = decodeURIComponent(resumeMatch[1]);
+    const uuid = params.id;
     const projectsDir = join(cfg.claudeDir, "projects");
     const sessionsDir = join(cfg.claudeDir, "sessions");
 
@@ -1359,21 +1174,12 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
           { status: 502 },
         );
     }
-  }
-  // Restart — resume/fresh recycle of a LIVE session (2-7). BOTH modes require an
-  // explicit confirm-before-kill (AC7.1: the kill loses in-flight turn state). The
-  // kill is sequenced by DIRECT PROBES — `tmux kill-session` rc + a fresh /proc-gone
-  // read + a fresh tmux has-session — never the ≤3s tick snapshot (AC7.2); the
-  // relaunch happens ONLY after confirmed-dead, under the per-uuid lock (shared with
-  // resume so a uuid can't be resumed and restarted at once). Resume-restart relaunches
-  // `--resume <uuid>` (same conversation); fresh-restart spawns a NEW `--session-id` in
-  // the same cwd and does NOT delete the old transcript (AC7.3).
-  const restartMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/restart$/);
-  if (restartMatch && req.method === "POST") {
+  },
+  restart: async ({ req, now, ip, params }) => {
     if (spawnLimited(ip, now))
       return Response.json({ ok: false, reason: "rate-limited" }, { status: 429 });
     recordSpawn(ip, now);
-    const uuid = decodeURIComponent(restartMatch[1]);
+    const uuid = params.id;
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
 
     // AC7.1 — confirm-before-kill gate. No confirm ⇒ 428 (precondition: confirm
@@ -1507,10 +1313,26 @@ async function route(req: Request, url: URL, now: number, ip: string): Promise<R
         // orchestration never returns them here — this is an unreachable safety net.
         return Response.json({ ok: false, reason: "spawn-failed" }, { status: 502 });
     }
-  }
-  if (url.pathname === "/api/health") {
+  },
+  health: async (_c) => {
     return Response.json({ ok: true, generatedAt: snapshot.generatedAt });
+  },
+};
+
+const COMPILED_ROUTES = compileRoutes(
+  API.map((spec) => ({ ...spec, handler: HANDLERS[spec.name] })),
+);
+
+async function route(req: Request, url: URL, now: number, ip: string): Promise<Response> {
+  // Alerts/push are a prefix-matched SUB-ROUTER, not table routes: they own a
+  // whole namespace and may decline a request inside it, which then falls
+  // through to the tail exactly as it did in the if-chain.
+  if (url.pathname.startsWith("/api/push/") || url.pathname.startsWith("/api/alerts/")) {
+    const res = await handleAlertRequest(req, url);
+    if (res) return res;
   }
+  const m = matchRoute(COMPILED_ROUTES, req.method, url.pathname);
+  if (m) return m.handler({ req, url, now, ip, params: m.params });
   return serveStatic(url.pathname);
 }
 
@@ -1608,5 +1430,8 @@ console.log(`[bifrost] watching from http://${server.hostname}:${server.port}`);
 const lim = summarizeLimits(cfg);
 console.log(
   `[bifrost] summarize: ${lim.maxInFlight} concurrent slots, ${lim.reserveMb}MB reserve floor ` +
-    `(derived from ${(lim.totalMb / 1024).toFixed(1)}G box)`,
+    (lim.basis === "cgroup"
+      ? `(derived from this unit's ${(lim.cgroupMaxMb! / 1024).toFixed(1)}G MemoryMax — ` +
+        `the jobs run inside it; box is ${(lim.totalMb / 1024).toFixed(1)}G)`
+      : `(derived from ${(lim.totalMb / 1024).toFixed(1)}G box — this unit has no MemoryMax)`),
 );
