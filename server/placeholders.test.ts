@@ -27,26 +27,29 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { existsSync, readdirSync } from "node:fs";
 import {
+  COMMON_WORDS,
+  DEMO_PROJECTS,
+  FIXTURE_UUIDS,
+  PLACEHOLDER,
+  projectSegment,
+} from "./testing/identifiers";
+import {
   CGNAT,
   CONCAT_HOME,
-  DEMO_PROJECTS,
   EMAIL,
-  FIXTURE_UUIDS,
   HOME_PATH,
   HOME_ROOTED,
   HOME_SLUG,
-  PLACEHOLDER,
-  projectSegment,
   ROOTED_PATH,
-  STRING_LITERAL,
   TAILNET,
   UUID,
-} from "./testing/identifiers";
+  WORD_TOKEN,
+} from "./testing/patterns";
 
 const repoRoot = join(import.meta.dir, "..");
 
-/** The one file the scan cannot read: it is made of the patterns it matches. */
-const PATTERNS_MODULE = "server/testing/identifiers.ts";
+/** The one file the scan cannot read: it is regexes, which look like matches. */
+const PATTERNS_MODULE = "server/testing/patterns.ts";
 
 async function trackedTextFiles(): Promise<string[]> {
   const proc = Bun.spawn(["git", "-C", repoRoot, "ls-files", "-z"], {
@@ -61,6 +64,30 @@ async function trackedTextFiles(): Promise<string[]> {
     .filter((f) => !/\.(png|jpe?g|gif|webp|ico|woff2?|ttf)$/i.test(f));
 }
 
+const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|woff2?|ttf)$/i;
+
+/** Every tracked file, binaries included — the extension filter comes later. */
+async function allTrackedFiles(): Promise<string[]> {
+  const proc = Bun.spawn(["git", "-C", repoRoot, "ls-files", "-z"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out.split("\0").filter(Boolean);
+}
+
+/** Every commit message in the repo — the channel a tree scan cannot see. */
+async function allCommitMessages(): Promise<string> {
+  const proc = Bun.spawn(["git", "-C", repoRoot, "log", "--all", "--format=%B%n%an%n%ae"], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const out = await new Response(proc.stdout).text();
+  await proc.exited;
+  return out;
+}
+
 const files = await trackedTextFiles();
 const scannable = files.filter((f) => f !== PATTERNS_MODULE);
 const read = (f: string) => Bun.file(join(repoRoot, f)).text();
@@ -72,8 +99,10 @@ async function scan(pattern: RegExp): Promise<string[]> {
     let text: string;
     try {
       text = await read(f);
-    } catch {
-      continue;
+    } catch (err) {
+      // Loudly, not silently: an unreadable tracked file is a file this guard
+      // cannot vouch for, and the earlier version just skipped it.
+      throw new Error(`placeholders: cannot read tracked file ${f} — ${String(err)}`);
     }
     text.split("\n").forEach((line, i) => {
       for (const m of line.matchAll(pattern)) hits.push(`${f}:${i + 1}  ${m[0]}`);
@@ -100,8 +129,32 @@ function localProjectNames(): string[] {
 }
 
 const realNames = localProjectNames()
-  .filter((n) => n.length >= 4 && !["bifrost", "web", "src", "code"].includes(n))
-  .map((n) => n.toLowerCase());
+  .map((n) => n.toLowerCase())
+  .filter((n) => n.length >= 4 && n !== "bifrost" && !COMMON_WORDS.has(n));
+
+const flat = (v: string) => v.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+/**
+ * Does this token name a real directory?
+ *
+ * Exact match on the separator-stripped form, so a hyphenated name is caught in
+ * its CamelCase and underscored spellings too — OR a boundary-delimited
+ * occurrence inside a longer token, so a name embedded in a path is caught.
+ *
+ * Deliberately NOT a plain substring test: a short real name would then match
+ * inside ordinary English words, which floods the check with noise and gets it
+ * deleted. Both halves were found by running it, not by reasoning about it.
+ */
+function matchesRealName(token: string): string | null {
+  const f = flat(token);
+  const lower = token.toLowerCase();
+  for (const name of realNames) {
+    if (f === flat(name)) return name;
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(?:^|[^a-z0-9])${esc}(?:$|[^a-z0-9])`).test(lower)) return name;
+  }
+  return null;
+}
 
 function skipNotice(): void {
   console.warn(
@@ -116,8 +169,28 @@ describe("shape: no real machine identifiers", () => {
     expect(files.length).toBeGreaterThan(50);
   });
 
-  test("the patterns module is the ONLY unscanned file", () => {
-    expect(files.filter((f) => !scannable.includes(f))).toEqual([PATTERNS_MODULE]);
+  // Computed against EVERY tracked file, not the extension-filtered list — the
+  // earlier version compared the filtered list against itself and could not fail.
+  test("the patterns module is the only text file exempt from the scan", async () => {
+    const all = await allTrackedFiles();
+    const text = all.filter((f) => !BINARY_EXT.test(f));
+    expect(text.filter((f) => !scannable.includes(f))).toEqual([PATTERNS_MODULE]);
+  });
+
+  // Binary files are excluded from the text scan, so they are checked directly
+  // rather than trusted. A PNG comment chunk is a real place to hide a string.
+  test("no binary carries embedded text that could hold an identifier", async () => {
+    const all = await allTrackedFiles();
+    const offenders: string[] = [];
+    for (const f of all.filter((x) => BINARY_EXT.test(x))) {
+      const buf = new Uint8Array(await Bun.file(join(repoRoot, f)).arrayBuffer());
+      const ascii = Array.from(buf, (b) => (b >= 32 && b < 127 ? String.fromCharCode(b) : "\u0000")).join("");
+      for (const chunk of ["tEXt", "iTXt", "zTXt", "eXIf", "Comment"]) {
+        if (ascii.includes(chunk)) offenders.push(`${f}  (${chunk} chunk)`);
+      }
+      for (const m of ascii.matchAll(/\/home\/[A-Za-z0-9._-]+/g)) offenders.push(`${f}  ${m[0]}`);
+    }
+    expect(offenders).toEqual([]);
   });
 
   test("every absolute home path is the placeholder user", async () => {
@@ -183,28 +256,18 @@ describe("allowlist: fixtures use declared values only", () => {
     expect(bad).toEqual([]);
   });
 
-  // Enforces the claim that the unscanned patterns module holds no VALUES —
-  // checked on its string literals, not its regex sources, which necessarily
-  // look like what they match.
-  test("the patterns module carries patterns and vocabulary, never a value", async () => {
+  // The exclusion is safe only because the excluded file cannot hold a value.
+  // Rather than asserting that in a comment, this pins the file's GRAMMAR: every
+  // substantive line is a regex export. A literal has nowhere to live.
+  test("the unscanned module contains regex declarations and nothing else", async () => {
     const raw = await read(PATTERNS_MODULE);
-    const literals = [...raw.matchAll(/"([^"\\\n]*)"/g)].map((m) => m[1]);
-    const suspicious = literals.filter(
-      (l) =>
-        (/\/home\//i.test(l) && l !== PLACEHOLDER.home) ||
-        (/[-_]home[-_]/i.test(l) && l !== PLACEHOLDER.homeSlug) ||
-        (/\.ts\.net/i.test(l) && !l.includes(PLACEHOLDER.tailnet)) ||
-        (/\b100\.\d/.test(l) && l !== PLACEHOLDER.cgnat),
-    );
-    expect(suspicious).toEqual([]);
-    const uuids = [...raw.matchAll(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi)];
-    expect(uuids.map((m) => m[0]).filter((u) => !FIXTURE_UUIDS.has(u))).toEqual([]);
+    const stripped = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const lines = stripped.split("\n").map((l) => l.trim()).filter(Boolean);
+    const bad = lines.filter((l) => !/^export const [A-Z_0-9]+ = \/.*\/[gimsuy]*;$/.test(l));
+    expect(bad).toEqual([]);
   });
 });
 
-// Reality: the only check that can tell an invented name from a real one. It
-// needs the machine to compare against, so it cannot run on a CI runner — the
-// allowlists above are what carry the guarantee there.
 describe("reality: fixtures do not name anything on this machine", () => {
   test("no fixture PATH segment names a real directory", async () => {
     if (!realNames.length) return skipNotice();
@@ -228,17 +291,74 @@ describe("reality: fixtures do not name anything on this machine", () => {
   // The class that left a real project name behind as a bare search term after
   // an earlier scrub rewrote the path but not the string next to it. A name in
   // a quoted string is just as real as one in a path.
-  test("no bare string literal is a real directory name", async () => {
+  // Any text, not just quoted literals: a real name is equally real in a comment
+  // or in prose, and the quoted-only version missed exactly that channel.
+  // Compared with separators stripped, so a hyphenated name, its CamelCase form
+  // and its underscored form are all recognised as the same name.
+  test("no text anywhere names a real directory", async () => {
     if (!realNames.length) return skipNotice();
-    const hits = await scan(STRING_LITERAL);
+    const hits = await scan(WORD_TOKEN);
     const offenders: string[] = [];
     for (const hit of hits) {
-      const raw = hit.slice(hit.indexOf("  ") + 2).replace(/^["'`]|["'`]$/g, "");
-      const words = raw.toLowerCase().split(/[^a-z0-9-]+/).filter(Boolean);
-      for (const name of realNames) {
-        if (words.includes(name)) offenders.push(`${hit}  (real directory: ${name})`);
-      }
+      const raw = hit.slice(hit.indexOf("  ") + 2);
+      const name = matchesRealName(raw);
+      if (name) offenders.push(`${hit}  (real directory: ${name})`);
     }
     expect(offenders).toEqual([]);
+  });
+
+  // Both allowlists are self-certifying without this: the uuid check validates
+  // ids against the set, and the vocabulary check validates names against the
+  // set, so poisoning either is invisible to the thing it feeds. These are the
+  // reality cross-checks that make adding an entry a claim that can be false.
+  test("no declared fixture uuid names a real session on this machine", async () => {
+    const projects = join(homedir(), ".claude", "projects");
+    if (!existsSync(projects)) return skipNotice();
+    const real = new Set<string>();
+    for (const slug of readdirSync(projects)) {
+      try {
+        for (const f of readdirSync(join(projects, slug))) {
+          const m = f.match(/^([0-9a-f-]{36})\.jsonl$/i);
+          if (m) real.add(m[1].toLowerCase());
+        }
+      } catch {
+        /* unreadable slug dir */
+      }
+    }
+    expect([...FIXTURE_UUIDS].filter((u) => real.has(u))).toEqual([]);
+  });
+
+  test("no declared demo project name is a real directory on this machine", () => {
+    expect([...DEMO_PROJECTS].filter((d) => realNames.includes(d))).toEqual([]);
+  });
+
+  // The channel the tree scan structurally cannot see — and the one a real leak
+  // actually used: a commit message naming a client project.
+  test("no commit message or author field names a real directory", async () => {
+    if (!realNames.length) return skipNotice();
+    const text = await allCommitMessages();
+    const offenders: string[] = [];
+    text.split("\n").forEach((line) => {
+      for (const tok of line.match(WORD_TOKEN) ?? []) {
+        const name = matchesRealName(tok);
+        if (name) offenders.push(`commit message: "${tok}" names ${name}`);
+      }
+    });
+    expect([...new Set(offenders)]).toEqual([]);
+  });
+
+  test("no commit message carries a machine identifier", async () => {
+    const text = await allCommitMessages();
+    for (const pat of [HOME_PATH, HOME_SLUG, TAILNET, CGNAT]) {
+      const bad = [...text.matchAll(pat)].map((m) => m[0]);
+      const ok = bad.filter(
+        (v) =>
+          v.toLowerCase() !== PLACEHOLDER.home &&
+          v.toLowerCase() !== PLACEHOLDER.homeSlug &&
+          !v.includes(PLACEHOLDER.tailnet) &&
+          v !== PLACEHOLDER.cgnat,
+      );
+      expect(ok).toEqual([]);
+    }
   });
 });
