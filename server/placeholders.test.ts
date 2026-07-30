@@ -43,21 +43,20 @@ async function trackedTextFiles(): Promise<string[]> {
   return out
     .split("\0")
     .filter(Boolean)
-    .filter((f) => !/\.(png|jpe?g|gif|webp|ico|woff2?|ttf|lock)$/i.test(f))
-    // This file is definitionally full of identifier-shaped text — the patterns
-    // it matches with are themselves matches. Scanning itself flagged its own
-    // documentation once and its own regex source once, so it is excluded and
-    // carries no fixtures of its own to make that exclusion cost anything.
-    .filter((f) => f !== "server/placeholders.test.ts");
+    .filter((f) => !/\.(png|jpe?g|gif|webp|ico|woff2?|ttf)$/i.test(f));
 }
 
 const files = await trackedTextFiles();
+/** This file self-matches on its own regex source, so pattern scans skip it —
+ *  but ONLY those. The allowlist below is what makes that exclusion safe. */
+const SELF = "server/placeholders.test.ts";
+const scannable = files.filter((f) => f !== SELF);
 const read = (f: string) => Bun.file(join(repoRoot, f)).text();
 
 /** Where a match lives, so a failure names the file and line, not just the value. */
 async function scan(pattern: RegExp): Promise<string[]> {
   const hits: string[] = [];
-  for (const f of files) {
+  for (const f of scannable) {
     let text: string;
     try {
       text = await read(f);
@@ -104,12 +103,31 @@ describe("fixtures do not name a real directory on this machine", () => {
         .filter((n) => n.length >= 4 && !["bifrost", "web", "src", "code"].includes(n))
         .map((n) => n.toLowerCase()),
     );
-    if (!local.size) return; // no roots here — nothing to compare against
+    // On a CI runner none of those roots exist, so this check has nothing to
+    // compare against and passes vacuously. That is correct — there is nothing
+    // to leak from a machine with no projects on it — but a green badge must
+    // not be read as evidence this ran. It says so out loud instead.
+    if (!local.size) {
+      console.warn(
+        "[placeholders] reality check SKIPPED: no developer project roots on this host. " +
+          "The shape and vocabulary checks still ran; this one only protects when the " +
+          "suite runs on the machine the fixtures could have leaked from.",
+      );
+      return;
+    }
 
-    const hits = await scan(/(?:\/home\/you|-home-you)[A-Za-z0-9._/-]*/g);
+    // Any rooted path, not just the placeholder home: a real directory name is
+    // equally real under /srv, /opt or a tilde. Root-agnostic because what is
+    // being checked is the NAME, and the name does not care where it is rooted.
+    const hits = await scan(/(?:~|\/[A-Za-z0-9._-]+|[-_]home[-_]you)[A-Za-z0-9._/-]*/gi);
     const offenders: string[] = [];
     for (const hit of hits) {
-      const value = hit.slice(hit.indexOf("  ") + 2).toLowerCase();
+      // Drop a trailing filename: "docs/<name>.png" is a file, and a file that
+      // happens to begin with a real directory's name is not a leak.
+      const value = hit
+        .slice(hit.indexOf("  ") + 2)
+        .toLowerCase()
+        .replace(/\/[^/]*\.[a-z0-9]+$/, "/");
       for (const name of local) {
         // Boundary-delimited substring, not a split on "-": a hyphenated name
         // like "<word>-<word>" never survives splitting into segments, which is
@@ -128,8 +146,8 @@ describe("no real machine identifiers are published", () => {
   });
 
   test("every absolute home path is the placeholder user", async () => {
-    const hits = await scan(/\/home\/[A-Za-z0-9._-]+/g);
-    expect(hits.filter((h) => !h.endsWith("/home/you"))).toEqual([]);
+    const hits = await scan(/\/home\/[A-Za-z0-9._-]+/gi);
+    expect(hits.filter((h) => !h.toLowerCase().endsWith("/home/you"))).toEqual([]);
   });
 
   // The form that actually got through: Claude Code slugifies a working
@@ -138,8 +156,20 @@ describe("no real machine identifiers are published", () => {
   // slashes sails straight past. Deliberately described rather than shown: an
   // example here would be a literal identifier in a file this test scans.
   test("every slugified home path is the placeholder user", async () => {
-    const hits = await scan(/-home-[A-Za-z0-9._-]+?-/g);
-    expect(hits.filter((h) => !h.endsWith("-home-you-"))).toEqual([]);
+    // Case-insensitive, and both separators: the slug form is produced by
+    // replacing path separators, and which character does the replacing is an
+    // implementation detail no scrub should depend on.
+    const hits = await scan(/[-_]home[-_][A-Za-z0-9._-]+?[-_]/gi);
+    const ok = (h: string) => /[-_]home[-_]you[-_]$/i.test(h);
+    expect(hits.filter((h) => !ok(h))).toEqual([]);
+  });
+
+  // A path assembled from fragments defeats every pattern above, because no
+  // single literal in the source contains it. Cheap to check, and it is the
+  // obvious way to smuggle one past a scanner that only reads literals.
+  test("no source concatenates a home path out of fragments", async () => {
+    const hits = await scan(/"\/home\/?"\s*\+|"[-_]home[-_]"\s*\+|\+\s*"\/home/gi);
+    expect(hits).toEqual([]);
   });
 
   test("every tailnet host announces itself as a placeholder", async () => {
@@ -207,6 +237,51 @@ describe("no real machine identifiers are published", () => {
       offenders.add(`${hit}  (project: ${seg})`);
     }
     expect([...offenders]).toEqual([]);
+  });
+
+  // The class that actually got through the LAST scrub. A session id is opaque,
+  // so no shape check can tell a real one from an invented one — but the repo
+  // only ever needs invented ones, so the shapes it uses are declarable. A real
+  // Claude Code session id is random hex and will not match.
+  //
+  // This is the same positive-allowlist logic as the project-name check, and it
+  // exists because the previous scrub rewrote the DIRECTORY on a fixture line
+  // and left the session id sitting inside the same string.
+  test("every session uuid is a declared synthetic fixture, not a real id", async () => {
+    const hits = await scan(
+      /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+    );
+    const bad = hits.filter((h) => {
+      const hex = h.slice(h.lastIndexOf(" ") + 1).toLowerCase().replace(/-/g, "");
+      // Every fixture in this repo is hand-typed from repeated characters
+      // ("aaaa", "1111", "ffff"). A random v4 id essentially never contains a
+      // run of three identical hex digits, so requiring one separates them
+      // without needing to know any real value. Character VARIETY does not
+      // work here — "1a2b3c4d-1111-…" is synthetic and has plenty of it.
+      return !/(.)\1{2,}/.test(hex);
+    });
+    expect(bad).toEqual([]);
+  });
+
+  // Belt for the self-exclusion above: the scanner skips its own source, so the
+  // claim "it carries no fixtures" has to be enforced rather than asserted in a
+  // comment. Anything identifier-shaped in this file must be a pattern, not a
+  // value — checked by requiring the literal placeholder tokens and nothing else.
+  test("the guard's own source carries no identifier-shaped literals", async () => {
+    // Only double-quoted string literals. The regexes in this file necessarily
+    // LOOK like the values they match, which is the whole reason the scanner
+    // skips this file — so re-scanning its raw source would fail on its own
+    // patterns and teach nothing.
+    const raw = await read(SELF);
+    const self = [...raw.matchAll(/"([^"\\]*)"/g)].map((m) => m[1]).join("\n");
+    const paths = [...self.matchAll(/\/home\/[A-Za-z0-9._-]+/g)].map((m) => m[0]);
+    expect(paths.filter((p) => p !== "/home/you")).toEqual([]);
+    const ips = [...self.matchAll(/\b100\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g)].map((m) => m[0]);
+    expect(ips.filter((i) => i !== "100.100.100.100")).toEqual([]);
+    const hosts = [...self.matchAll(/[A-Za-z0-9._-]+\.ts\.net/g)].map((m) => m[0]);
+    expect(hosts.filter((h) => !h.includes("your-tailnet"))).toEqual([]);
+    const uuids = [...self.matchAll(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi)];
+    expect(uuids.map((m) => m[0])).toEqual([]);
   });
 
   test("every e-mail address sits in the RFC 2606 reserved domain", async () => {
