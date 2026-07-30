@@ -1,20 +1,28 @@
 # Bifrost
 
-A self-hosted web dashboard for running [Claude Code](https://claude.com/claude-code) on a dev box. It shows every project and live session on the machine, and lets you drive sessions from any device on your private network — phone included.
+[![CI](https://github.com/timyjsong/bifrost/actions/workflows/ci.yml/badge.svg)](https://github.com/timyjsong/bifrost/actions/workflows/ci.yml)
 
-Bifrost reads session transcripts and `/proc` directly, so it sees everything: interactive sessions, background agents, subprocess trees, context-window usage, system pressure. For interactive tmux sessions it goes further than watching — you can send prompts, answer permission menus, interrupt a running turn, or open a live terminal mirror. Installed as a PWA, it sends a push notification when a session needs you; tapping it opens the exact session waiting for an answer.
+A self-hosted web dashboard for running [Claude Code](https://claude.com/claude-code) on a dev box. It shows every project and live session on the machine, and lets you start, resume, and drive sessions from any device on your private network — phone included.
 
-## How it was built
+Bifrost reads session transcripts and `/proc` directly, so it sees everything: interactive sessions, background agents, subprocess trees, context-window usage, system pressure. For interactive tmux sessions it goes further than watching — you can send prompts, answer permission menus, interrupt a running turn, switch model or effort, or open a live terminal mirror. Installed as a PWA, it sends a push notification when a session needs you; tapping it opens the exact session waiting for an answer.
 
-Bifrost was implemented end-to-end in Claude Code sessions under a documented working agreement: requirements are agreed with the owner first, the build then runs autonomously, and a review cycle follows until both sides converge. Every cycle ships contract tests for the logic it added — tests encode the requirement, not the implementation. The commit history is the build log: per-milestone commits with co-author trailers. The design documents the shipped builds were greenlit against are preserved in `phases/`.
+I built it because I was driving Claude Code by sshing into a box and reattaching tmux from whatever device I had, which works badly from a phone. Bifrost is the interface I wanted instead.
+
+![The sessions dashboard](docs/dashboard.png)
 
 ## Features
 
 **Sessions.** Every session on the box appears as a card or table row with its activity state (`needs you` / `approval` / `paused` / `working`), derived from the transcript tail and cross-checked against `/proc`. Cards show where the session lives (tmux / ssh / desktop), which model it runs, and a context-window gauge that tracks model switches — when the window size is a guess rather than a measurement, the gauge says so. Fan-out agents and background tasks are attributed to their owning session by matching transcript tool calls against live process command lines; work that detached from its parent process is recovered through task-output file descriptors. Filters (residence, model, activity) narrow the board.
 
-**Drive.** Open a session and the conversation renders live over SSE, with collapsible tool calls and markdown. Typing is local and instant; drafts sync across devices; sending has a short grace window during which you can cancel. Interrupt sends Esc — never Ctrl-C, which would kill the session. When Claude shows a permission menu, Bifrost parses it from the pane and renders answer buttons; if the parse isn't confident, it shows the raw pane instead of guessing, because a silently wrong answer is worse than no answer. There is also a slash-command suggester, a permission-mode toggle (auto / accept edits / plan), file attach, and a read-only xterm.js terminal mirror as the fallback for anything the structured view can't handle.
+**Session lifecycle.** Start a fresh session in any project directory, resume an inactive one, or restart a live one — from the dashboard, without touching a terminal. Origination picks a directory through a confined browser and a model from an allowlist, then launches into a new interactive tmux session. Resume refuses to run until it has a *positive* signal that the session is not already live (quiescent transcript, no live pid, no owned tmux session), read fresh at click time rather than from the tick snapshot, because resuming a live session would put two writers on one transcript. Everything is serialized per session under a lock that claims a pending slot before spawning, so a double-click gets a 409 instead of a second process. Restart confirms before killing, since killing loses in-flight turn state.
 
-**Alerts and push.** A signal engine derives 12 tunable signals (session waiting, approval needed, memory pressure, service down, and so on) and maps them to Web Push notifications, which work away from your network. Session alerts deep-link into the drive view.
+**Drive.** Open a session and the conversation renders live over SSE, with collapsible tool calls and markdown. Typing is local and instant; drafts sync across devices; sending has a short grace window during which you can cancel. Interrupt sends Esc — never Ctrl-C, which would kill the session. When Claude shows a permission menu, Bifrost parses it from the pane and renders answer buttons; if the parse isn't confident, it shows the raw pane instead of guessing, because a silently wrong answer is worse than no answer. Model, effort, and rewind are driven through the real TUI pickers: the options are read from the live pane, then the picker is released immediately, so backing out never leaves a session sitting at a prompt. There is also a slash-command suggester, a permission-mode toggle, file attach, and a read-only xterm.js terminal mirror as the fallback for anything the structured view can't handle.
+
+![Driving a session](docs/drive.png)
+
+**Alerts and push.** A signal engine derives 13 tunable signals (session waiting, approval needed, memory pressure, service down, and so on) and maps them to Web Push notifications, which work away from your network. Session alerts deep-link into the drive view. Which units get watched is configuration, and an unconfigured install watches nothing rather than alerting about services it invented.
+
+**Search and history.** Sessions are indexed mtime-first and persisted across restarts, so a cold start doesn't re-parse the whole transcript pile. Name search filters the full uncapped set in memory on every keystroke. Pinning keeps a session surfaced past the history cutoff.
 
 **Summaries.** One click summarizes a transcript using a background Claude session. A queue sized from the box's RAM keeps concurrent jobs bounded; results are cached until the transcript changes.
 
@@ -24,7 +32,7 @@ Bifrost was implemented end-to-end in Claude Code sessions under a documented wo
 
 ## Design constraints
 
-- **No headless Claude.** Bifrost never invokes `claude -p` or the Agent SDK (a hard project constraint — programmatic usage bills separately). It observes through disk and `/proc`, and interacts by injecting keystrokes into existing interactive sessions through tmux. The one exception: summaries start an interactive-class background session, and only when you click.
+- **No headless Claude.** Bifrost never invokes `claude -p` or the Agent SDK (a hard project constraint — programmatic usage bills separately). It observes through disk and `/proc`, and interacts by injecting keystrokes into existing interactive sessions through tmux. Starting a session means launching a real interactive session in tmux, never a headless one. The one exception: summaries start an interactive-class background session, and only when you click.
 - **Latency lives in transport, not interaction.** Input echoes locally and is sent on commit; keystrokes never cross the network one at a time.
 - **Single user, private network.** Bifrost binds a private interface (a Tailscale IP, a LAN address) and is not meant to face the internet. Auth exists so that a lost phone is not a lost box.
 - **No database.** One Bun process. Everything is read live from disk and `/proc` with mtime-keyed caches.
@@ -34,14 +42,22 @@ Bifrost was implemented end-to-end in Claude Code sessions under a documented wo
 ```
 server/                Bun + TypeScript (run natively, no build step)
   index.ts             HTTP + SSE + static serving of web/dist
-  collectors/          sessions (transcripts + /proc), projects (git), system
+  collectors/          sessions (transcripts + /proc), projects (git), system,
+                       persisted mtime-first session index
   drive/               transcript parser, tmux send + target validation,
-                       permission-menu parser, drafts, slash scan, uploads
+                       permission-menu parser, model/effort/rewind pickers,
+                       diffs, drafts, slash scan, uploads
+  spawn/               originate / resume / restart, spawn registry with a
+                       per-session lock, memory gate, confinement
+  lifecycle/           idle-park sweeper (ships disarmed)
+  search/              name search over the session index
+  sessions/            pins and history-cutoff bypass
   alerts/              signal derivation, alert engine, Web Push, VAPID keys
   auth/                request guard, tokens, enrollment, throttle + CLI
   files/               realpath-confined read-only browser
 web/                   Vite + React 19 + Tailwind v4 SPA
 shared/                one Snapshot type, used by both sides
+phases/                the design docs each build was greenlit against
 deploy/bifrost.service systemd unit
 ```
 
@@ -51,13 +67,17 @@ deploy/bifrost.service systemd unit
 
 ## Tests
 
-`bun run check` runs the unit suite (305 tests across 31 files) plus server and web typechecks. The tests cover the logic layer: transcript parsing, state derivation, process attribution, tmux target validation, menu parsing, the summarize queue, auth, window resolution, filters, and view models. Presentation is verified by eye; any logic added in a review cycle ships with tests in that cycle's commit.
+`bun run check` runs the unit suite plus server and web typechecks; CI runs it on every push, so the badge above is the current answer rather than a number in a README. At the time of writing it is 759 tests across 75 files.
+
+The tests cover the logic layer: transcript parsing, state derivation, process attribution, tmux target validation, menu parsing, spawn confinement and the resume liveness gate, picker option matching, the summarize queue, auth, window resolution, filters, and view models. They are written from the requirement, not the implementation — a failing test means the behavior changed, not that the test needs updating.
+
+Coverage is uneven, and the distribution is worth stating rather than hiding behind the total. `bun test --coverage` reports about 90% of lines overall: `server/auth/*`, `server/derive.ts`, the `spawn/` lifecycle modules and the web `lib/` modules sit at or near 100%, while `server/collectors/sessions.ts` — the largest file, and the one behind the transcript-plus-`/proc` claim — is around 53%. `server/index.ts` has no route tests and there are no component tests at all; the HTTP layer is verified by hand and presentation by eye.
 
 ## Requirements
 
 - Linux (Bifrost reads `/proc`)
 - [Bun](https://bun.sh)
-- tmux, for driving sessions
+- tmux, for driving and starting sessions
 - Claude Code installed and used on the same box
 - A private network to serve on — a Tailscale tailnet, VPN, or LAN
 
@@ -65,7 +85,7 @@ deploy/bifrost.service systemd unit
 
 ```sh
 cp bifrost.config.example.json bifrost.config.json
-# edit: bind host (a private IP), realms (project dirs), auth allowlists
+# edit: bind host, realms (project dirs), auth allowlists
 
 bun install
 cd web && bun install && bun run build && cd ..   # build the frontend once
@@ -74,9 +94,9 @@ bun server/index.ts        # serve API + frontend
 bun run enroll             # mint a QR enrollment code for your first device
 ```
 
-For frontend development: `cd web && bun run dev` proxies `/api` to the running server.
+For frontend development: `cd web && bun run dev` proxies `/api` to the running server (override the target with `BIFROST_DEV_PROXY`).
 
-The `auth.origins` / `auth.hosts` allowlists must match the exact host you browse to, or every request is denied — that is the fail-closed default. `auth.enrollUrl` is the address the QR code points new devices at; if you want push notifications and camera-based QR enrollment on iOS, that address needs HTTPS (for example via `tailscale serve` or a local Caddy in front).
+The example config binds `127.0.0.1`, which is the safe default but only reachable from the box itself — point `bind.host` at your private interface once you have the allowlists right. Those `auth.origins` / `auth.hosts` allowlists must match the exact host you browse to, or every request is denied; that is the fail-closed default, and it is the first thing to check if the UI loads but every request 403s. `auth.enrollUrl` is the address the QR code points new devices at; if you want push notifications and camera-based QR enrollment on iOS, that address needs HTTPS (for example via `tailscale serve` or a local Caddy in front). Only an `https://` enrollUrl is treated as a secure origin.
 
 Environment overrides: `BIFROST_CONFIG` (config path), `BIFROST_DATA_DIR` (token/alert storage, default `data/`), `BIFROST_VAPID_SUBJECT` (contact address in Web Push headers).
 
@@ -91,11 +111,21 @@ sudo systemctl enable --now bifrost
 sudo systemctl status bifrost
 ```
 
-Server code changes need a service restart. Frontend changes only need `cd web && bun run build` — the running server picks up the new bundle. Footprint in practice: ~52MB RSS, ~0% CPU when idle.
+Server code changes need a service restart. Frontend changes only need `cd web && bun run build` — the running server picks up the new bundle.
+
+## How it was built
+
+I specced each build before it was written, agreed the acceptance criteria up front, then let the implementation run autonomously in Claude Code sessions and reviewed the result until it converged. Every cycle ships contract tests for the logic it added. The commit history is the build log, and the specs themselves are in [`phases/`](phases/) — including what was considered and rejected, and where a spec guessed wrong and the live system corrected it.
+
+The code was written in Claude Code sessions and every commit carries a co-author trailer to say so. What this repository evidences, then, is the part I actually did: deciding what to build, specifying the contracts, red-teaming the designs before they were built, and reviewing what came back. The security and concurrency decisions documented in `phases/` and in the module headers are the substance of it.
 
 ## Status
 
-v1 is shipped and in daily use: the full observe layer, plus driving existing tmux sessions. Starting, resuming, and restarting sessions from the dashboard is under active development on a local branch and lands here once it converges through review.
+In daily use on my own box: the observe layer, driving existing tmux sessions, and the alert/push layer are all shipped and converged.
+
+Session lifecycle — originate, resume, restart — is **built and green but its review cycle is still open**. The flows work and are covered by tests; what has not happened is my own final sign-off pass over them, so I am not calling that build converged. [`phases/02-start-restart.md`](phases/02-start-restart.md) says the same thing at the top of the file.
+
+Idle-park (`lifecycle/`) ships disarmed: the sweeper is implemented and observable, but killing idle sessions is off by default and gated behind config.
 
 ## License
 

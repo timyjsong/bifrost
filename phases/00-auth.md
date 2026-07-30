@@ -1,10 +1,12 @@
 # Phase 0 (Build 0) — Auth / Security
 
-**Status: BUILT & CONVERGED — deployed to prod 2026-06-16.** Gate live and
-enforcing on both routes; two devices enrolled (desktop + iOS PWA). All
-verification ACs pass live. As-built refinements recorded at the bottom.
+**Status: BUILT & CONVERGED — deployed 2026-06-16.** Gate live and enforcing on
+both routes; two devices enrolled (desktop + iOS PWA). All verification ACs pass
+live. As-built refinements recorded at the bottom. See
+[phases/README.md](README.md) for why these are published and what was edited
+before publishing.
 
-Robustness dialed UP per my explicit call (2026-06-16): *"make it more robust
+Robustness dialed UP on my explicit call (2026-06-16): *"make it more robust
 than you currently think it needs — once we're past Phase 0 there's a chance I
 forget to harden it later."* So Build 0 is specced to be **safe to leave
 unattended indefinitely**, within the structural ceiling of a bearer-token scheme
@@ -34,7 +36,7 @@ cross-origin writes (CSRF / DNS-rebinding) — and hardened to be set-and-forget
 4. **Enrollment: box-minted one-time code → token.** Easy AND gated (see below).
 
 ## Enrollment model (keystone — easy setup *and* robust)
-Root of trust = "can read from the box as that user" — the same boundary as everything
+Root of trust = "can read from the box as the owning user" — the same boundary as everything
 else on this machine.
 - A CLI on the box (e.g. `bun run enroll`) mints a **one-time enrollment code**
   (high-entropy, single-use, short TTL ~10 min) and renders it as a copyable string
@@ -72,7 +74,7 @@ else on this machine.
   custom-header token applies uniformly. Do NOT pass the token via query param for
   SSE — that reintroduces CSRF and leaks the token into logs/referrers.
 
-## Hardening (set-and-forget) — added per my call
+## Hardening (set-and-forget) — added on my call
 - Constant-time token compare (`timingSafeEqual`).
 - 256-bit CSPRNG tokens; enrollment codes single-use + TTL.
 - **Brute-force throttle:** after N failed auths (per-IP, in-memory) → backoff/429.
@@ -112,7 +114,7 @@ helps regardless of auth primitive.
 - Tailscale identity passthrough (Option B — no other users to distinguish).
 - Token rotation / expiry-refresh machinery (minimal regenerate stays).
 - Multi-user / roles / permissions (single-user tool).
-- Encrypting the token store beyond 0600 (0600-as-the-user IS the trust boundary;
+- Encrypting the token store beyond 0600 (0600-as-that-user IS the trust boundary;
   encrypting just moves the key problem).
 
 ## Standing rules
@@ -161,4 +163,4 @@ HTTPS only, CSP/security headers present, SW does not cache `/api`, data files 0
 XSS surface clean (no `dangerouslySetInnerHTML` / raw-HTML markdown).
 
 ## Gate
-I greenlighted the locked spec (2026-06-16); built, reviewed, and converged same day.
+I greenlit the locked spec (2026-06-16); built, reviewed, and converged same day.

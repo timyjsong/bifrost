@@ -2,14 +2,15 @@
 
 **Status: BUILT & CONVERGED** — greenlit 2026-06-17, shipped as Build 1 (all 8
 milestones), review cycle closed. This doc is the spec the build was greenlit
-against, kept unedited below; the ACs were the contract.
+against; the ACs were the contract. See [phases/README.md](README.md) for why
+these are published and what was edited before publishing.
 
 **Why this slice:** smallest *useful* unit — turns Bifrost into a real Claude Code
 client for the already-tmuxed sessions. Touches NO new `claude` invocation (injects
 into existing interactive sessions only), so it sidesteps the hard constraint and the
 billing question entirely. Reality check (2026-06-17): I start every non-ephemeral
 session by sshing in → tmux → claude, then drives it via the GUI's remote-control. So
-his real work IS tmux-resident → Build 1 covers it, not a toy subset. The only manual
+my real work IS tmux-resident → Build 1 covers it, not a toy subset. The only manual
 step Build 1 leaves standing is *origination* — which is exactly Build 2.
 
 ## Goal
@@ -33,18 +34,18 @@ my devices.
 - **Slash commands ride free** through the prompt box (typed text). A **minimal
   suggester** is in Build 1: scan disk (user/project custom commands + skills) + a
   static built-in list, client-side fuzzy filter, **fill-don't-auto-send**, never a
-  gate. **Dedicated command buttons (model-switch, `/clear`, etc.) are deferred to the
-  studio / Build 3** — they're a design surface, not hand-rolled here.
+  gate. **Dedicated command buttons (model-switch, `/clear`, etc.) are deferred to a
+  later build** — they're a design surface, not hand-rolled here.
 - **Out of Build 1:** mode-cycling (shift-tab), model-switch, start/restart (Build 2,
   needs launch-line sign-off).
 - **One build, eight internal commit milestones** (commit at each boundary).
 
 ## Injectable set
-Promptable IFF `tmuxSession` is set (derived in `deriveVia`, `server/derive.ts:283`).
+Promptable IFF `tmuxSession` is set (derived in `deriveVia`, `server/derive.ts:273`).
 Resolver refuses everything else. Non-tmux sessions show the control disabled + the
 reason — never a button that silently no-ops.
 
-## Plumbing contract (load-bearing — Build 3+ retrofits on this)
+## Plumbing contract (load-bearing — later builds retrofit on this)
 - Normalized interaction state: messages, live-stream buffer, pending-approval,
   current mode, **+ current draft (new)** — AND **session topology preserved**
   (subagents / background shells / fan-out, per epic principle 5) so the later
@@ -82,7 +83,7 @@ reason — never a button that silently no-ops.
   transcript with no missing and no duplicated blocks.
 - **AC2.5** Normalized state preserves session topology (subagent / background-shell /
   fan-out tree), even though Build 1 renders linearly — verified the tree is carried,
-  ready for Build 3.
+  ready for a richer renderer later.
 
 ### M3 — prompt (local-echo + draft-sync + commit-to-send)
 - **AC3.1** Typing is local-echo, instant, zero network per keystroke (keystrokes
@@ -148,7 +149,7 @@ reason — never a button that silently no-ops.
   never my live work.
 - **No payload content filtering** — security lives at the auth + target-validation
   layer; "anything typeable" is the design.
-- Commit at each milestone boundary; keep BUILD-STATE.md current; `bun run check`
+- Commit at each milestone boundary; `bun run check`
   green at every commit.
 
 ## Gate
